@@ -1,0 +1,9 @@
+apiVersion: odoo.odoo.io/v1
+kind: OdooAddon
+metadata:
+  labels:
+    app.kubernetes.io/name: odoo-k8-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: odooaddon-sample
+spec:
+  # TODO(user): Add fields here

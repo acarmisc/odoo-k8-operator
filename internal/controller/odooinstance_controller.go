@@ -183,6 +183,7 @@ func (r *OdooInstanceReconciler) reconcileConfigMap(ctx context.Context, instanc
 			odooConfig += fmt.Sprintf("db_port = %d\n", instance.Spec.Postgres.Port)
 			odooConfig += fmt.Sprintf("db_name = %s\n", instance.Spec.Postgres.Database)
 			odooConfig += fmt.Sprintf("db_user = %s\n", instance.Spec.Postgres.User)
+			odooConfig += "db_sslmode = require\n"
 			// db_password is passed via --db-password CLI arg to allow K8s env var expansion
 		}
 

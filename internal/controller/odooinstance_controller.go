@@ -230,6 +230,12 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 			},
 		})
 	}
+	if instance.Spec.Postgres.Database != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "PGSSLMODE",
+			Value: "require",
+		})
+	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		if err := controllerutil.SetControllerReference(instance, deploy, r.Scheme); err != nil {

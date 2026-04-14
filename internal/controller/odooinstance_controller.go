@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -114,43 +115,46 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 
 func (r *OdooInstanceReconciler) reconcilePVC(ctx context.Context, instance *odoov1.OdooInstance) error {
 	pvcName := fmt.Sprintf("%s-addons", instance.Name)
-	pvc := &corev1.PersistentVolumeClaim{
+	pvc := &corev1.PersistentVolumeClaim{}
+	err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: instance.Namespace}, pvc)
+	if err == nil {
+		// PVC already exists — spec is immutable once bound, nothing to update
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+
+	storageClass := instance.Spec.Addons.StorageClass
+	if storageClass == nil {
+		defaultClass := "standard"
+		storageClass = &defaultClass
+	}
+
+	size := instance.Spec.Addons.Size
+	if size == "" {
+		size = "10Gi"
+	}
+
+	newPVC := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pvcName,
 			Namespace: instance.Namespace,
 		},
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
-		if err := controllerutil.SetControllerReference(instance, pvc, r.Scheme); err != nil {
-			return err
-		}
-
-		storageClass := instance.Spec.Addons.StorageClass
-		if storageClass == nil {
-			defaultClass := "standard"
-			storageClass = &defaultClass
-		}
-
-		size := instance.Spec.Addons.Size
-		if size == "" {
-			size = "10Gi"
-		}
-
-		pvc.Spec = corev1.PersistentVolumeClaimSpec{
+		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			VolumeMode:  nil,
 			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceStorage: resource.MustParse(size),
 				},
 			},
 			StorageClassName: storageClass,
-		}
-		return nil
-	})
-
-	return err
+		},
+	}
+	if err := controllerutil.SetControllerReference(instance, newPVC, r.Scheme); err != nil {
+		return err
+	}
+	return r.Create(ctx, newPVC)
 }
 
 func (r *OdooInstanceReconciler) reconcileConfigMap(ctx context.Context, instance *odoov1.OdooInstance) error {

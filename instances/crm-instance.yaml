@@ -10,7 +10,7 @@ spec:
     size: 1Gi
     storageClass: standard
   postgres:
-    host: ces-dev-db-03
+    host: 10.1.128.19
     port: 5432
     database: odoo_crm
     user: odoo_admin

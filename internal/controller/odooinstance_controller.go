@@ -183,7 +183,7 @@ func (r *OdooInstanceReconciler) reconcileConfigMap(ctx context.Context, instanc
 			odooConfig += fmt.Sprintf("db_port = %d\n", instance.Spec.Postgres.Port)
 			odooConfig += fmt.Sprintf("db_name = %s\n", instance.Spec.Postgres.Database)
 			odooConfig += fmt.Sprintf("db_user = %s\n", instance.Spec.Postgres.User)
-			odooConfig += "db_password = ${DB_PASSWORD}\n"
+			// db_password is passed via --db-password CLI arg to allow K8s env var expansion
 		}
 
 		if cm.Data == nil {
@@ -257,6 +257,7 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 					{
 						Name:  "odoo",
 						Image: image,
+						Args:  buildOdooArgs(instance),
 						Ports: []corev1.ContainerPort{
 							{ContainerPort: 8069, Name: "odoo"},
 						},
@@ -338,6 +339,15 @@ func (r *OdooInstanceReconciler) reconcileService(ctx context.Context, instance 
 	})
 
 	return err
+}
+
+func buildOdooArgs(instance *odoov1.OdooInstance) []string {
+	args := []string{"--config", "/etc/odoo/odoo.conf"}
+	if instance.Spec.Postgres.PasswordSecret != "" {
+		// $(DB_PASSWORD) is expanded by Kubernetes before container start
+		args = append(args, "--db-password", "$(DB_PASSWORD)")
+	}
+	return args
 }
 
 func (r *OdooInstanceReconciler) handleFinalizer(ctx context.Context, instance *odoov1.OdooInstance) error {

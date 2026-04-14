@@ -41,6 +41,11 @@ import (
 const (
 	finalizerOdooAddon = "odoo.operator.io/finalizer"
 	cloneMountPath     = "/mnt/addons-clone"
+
+	phaseFailed  = "Failed"
+	phasePending = "Pending"
+	phaseCloning = "Cloning"
+	phaseSynced  = "Synced"
 )
 
 var addonLogger = logf.Log.WithName("controller_odooaddon")
@@ -63,7 +68,7 @@ func (r *OdooAddonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	if addon.ObjectMeta.DeletionTimestamp != nil {
+	if addon.DeletionTimestamp != nil {
 		return ctrl.Result{}, r.handleFinalizer(ctx, addon)
 	}
 
@@ -77,9 +82,11 @@ func (r *OdooAddonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	result, err := r.reconcileOdooAddon(ctx, addon)
 	if err != nil {
 		addonLogger.Error(err, "Failed to reconcile OdooAddon")
-		addon.Status.Phase = "Failed"
+		addon.Status.Phase = phaseFailed
 		addon.Status.Ready = false
-		r.Status().Update(ctx, addon)
+		if statusErr := r.Status().Update(ctx, addon); statusErr != nil {
+			addonLogger.Error(statusErr, "Failed to update addon status")
+		}
 	}
 
 	return result, err
@@ -93,24 +100,28 @@ func (r *OdooAddonReconciler) reconcileOdooAddon(ctx context.Context, addon *odo
 	}
 
 	if addon.Spec.InstanceRef.Name == "" {
-		addon.Status.Phase = "Pending"
+		addon.Status.Phase = phasePending
 		addon.Status.Ready = false
-		r.Status().Update(ctx, addon)
+		if statusErr := r.Status().Update(ctx, addon); statusErr != nil {
+			addonLogger.Error(statusErr, "Failed to update addon status")
+		}
 		return ctrl.Result{}, nil
 	}
 
 	instance := &odoov1.OdooInstance{}
 	if err := r.Get(ctx, types.NamespacedName{Name: instanceName, Namespace: instanceNamespace}, instance); err != nil {
 		if errors.IsNotFound(err) {
-			addon.Status.Phase = "Pending"
+			addon.Status.Phase = phasePending
 			addon.Status.Ready = false
-			r.Status().Update(ctx, addon)
+			if statusErr := r.Status().Update(ctx, addon); statusErr != nil {
+				addonLogger.Error(statusErr, "Failed to update addon status")
+			}
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
-	addon.Status.Phase = "Cloning"
+	addon.Status.Phase = phaseCloning
 
 	gitUrl := addon.Spec.GitUrl
 	gitRef := addon.Spec.GitRef
@@ -130,23 +141,25 @@ func (r *OdooAddonReconciler) reconcileOdooAddon(ctx context.Context, addon *odo
 	}
 
 	if !volumeMounted {
-		addon.Status.Phase = "Pending"
+		addon.Status.Phase = phasePending
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	commitHash, err := r.cloneOrUpdateRepo(ctx, gitUrl, gitRef, cloneDir, addonPath, singleAddon)
+	commitHash, err := r.cloneOrUpdateRepo(gitUrl, gitRef, cloneDir, addonPath, singleAddon)
 	if err != nil {
 		addonLogger.Error(err, "Failed to clone/update repository")
-		addon.Status.Phase = "Failed"
+		addon.Status.Phase = phaseFailed
 		addon.Status.Ready = false
-		r.Status().Update(ctx, addon)
+		if statusErr := r.Status().Update(ctx, addon); statusErr != nil {
+			addonLogger.Error(statusErr, "Failed to update addon status")
+		}
 		return ctrl.Result{}, err
 	}
 
 	addon.Status.ClonedCommit = commitHash
 	now := metav1.Now()
 	addon.Status.LastSyncTime = &now
-	addon.Status.Phase = "Synced"
+	addon.Status.Phase = phaseSynced
 	addon.Status.Ready = true
 
 	if err := r.Status().Update(ctx, addon); err != nil {
@@ -193,7 +206,7 @@ func (r *OdooAddonReconciler) ensureVolumeMounted(ctx context.Context, instance 
 	return true, nil
 }
 
-func (r *OdooAddonReconciler) cloneOrUpdateRepo(ctx context.Context, gitUrl, gitRef, cloneDir, addonPath string, singleAddon bool) (string, error) {
+func (r *OdooAddonReconciler) cloneOrUpdateRepo(gitUrl, gitRef, cloneDir, addonPath string, singleAddon bool) (string, error) {
 	repoDir := cloneDir
 	if !singleAddon && addonPath != "" {
 		repoDir = filepath.Join(cloneDir, addonPath)

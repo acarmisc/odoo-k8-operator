@@ -59,7 +59,7 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	if instance.ObjectMeta.DeletionTimestamp != nil {
+	if instance.DeletionTimestamp != nil {
 		return ctrl.Result{}, r.handleFinalizer(ctx, instance)
 	}
 
@@ -70,44 +70,46 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	result, err := r.reconcileOdooInstance(ctx, instance)
+	err = r.reconcileOdooInstance(ctx, instance)
 	if err != nil {
 		odooLogger.Error(err, "Failed to reconcile OdooInstance")
 		instance.Status.Phase = "Failed"
 		instance.Status.Ready = false
-		r.Status().Update(ctx, instance)
+		if statusErr := r.Status().Update(ctx, instance); statusErr != nil {
+			odooLogger.Error(statusErr, "Failed to update instance status")
+		}
 	}
 
-	return result, err
+	return ctrl.Result{}, err
 }
 
-func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, instance *odoov1.OdooInstance) (ctrl.Result, error) {
+func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, instance *odoov1.OdooInstance) error {
 	instance.Status.Phase = "Creating"
 	instance.Status.ObservedGeneration = instance.Generation
 
 	if err := r.reconcilePVC(ctx, instance); err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	if err := r.reconcileConfigMap(ctx, instance); err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	if err := r.reconcileDeployment(ctx, instance); err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	if err := r.reconcileService(ctx, instance); err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	instance.Status.Phase = "Running"
 	instance.Status.Ready = true
 	if err := r.Status().Update(ctx, instance); err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *OdooInstanceReconciler) reconcilePVC(ctx context.Context, instance *odoov1.OdooInstance) error {

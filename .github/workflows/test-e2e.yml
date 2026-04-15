@@ -2,7 +2,10 @@ name: E2E Tests
 
 on:
   push:
+    branches: [ "main" ]
+    tags: [ 'v*' ]
   pull_request:
+    branches: [ "main" ]
 
 jobs:
   test-e2e:
@@ -27,6 +30,8 @@ jobs:
         run: kind version
 
       - name: Running Test e2e
+        env:
+          CERT_MANAGER_INSTALL_SKIP: "true"
         run: |
           go mod tidy
           make test-e2e

@@ -219,7 +219,7 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 	var envVars []corev1.EnvVar
 	if instance.Spec.Postgres.PasswordSecret != "" {
 		envVars = append(envVars, corev1.EnvVar{
-			Name: "DB_PASSWORD",
+			Name: "PGPASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{
@@ -349,12 +349,8 @@ func (r *OdooInstanceReconciler) reconcileService(ctx context.Context, instance 
 }
 
 func buildOdooArgs(instance *odoov1.OdooInstance) []string {
-	args := []string{"--config", "/etc/odoo/odoo.conf"}
-	if instance.Spec.Postgres.PasswordSecret != "" {
-		// $(DB_PASSWORD) is expanded by Kubernetes before container start
-		args = append(args, "--db-password", "$(DB_PASSWORD)")
-	}
-	return args
+	// PGPASSWORD env var handles auth via libpq — no --db-password arg needed
+	return []string{"--config", "/etc/odoo/odoo.conf"}
 }
 
 func (r *OdooInstanceReconciler) handleFinalizer(ctx context.Context, instance *odoov1.OdooInstance) error {

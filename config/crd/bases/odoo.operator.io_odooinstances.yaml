@@ -75,12 +75,16 @@ spec:
                     type: string
                   port:
                     format: int32
+                    maximum: 65535
+                    minimum: 1
                     type: integer
                   user:
                     type: string
                 type: object
               replicas:
                 format: int32
+                maximum: 100
+                minimum: 1
                 type: integer
               resources:
                 description: ResourceRequirements describes the compute resource requirements.

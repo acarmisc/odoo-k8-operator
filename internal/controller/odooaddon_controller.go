@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,7 +40,7 @@ import (
 )
 
 const (
-	finalizerOdooAddon = "odoo.operator.io/finalizer"
+	finalizerOdooAddon = "odoo.operator.io/addon-finalizer"
 	cloneMountPath     = "/mnt/addons-clone"
 
 	phaseFailed  = "Failed"
@@ -94,9 +95,12 @@ func (r *OdooAddonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 func (r *OdooAddonReconciler) reconcileOdooAddon(ctx context.Context, addon *odoov1.OdooAddon) (ctrl.Result, error) {
 	instanceName := addon.Spec.InstanceRef.Name
-	instanceNamespace := addon.Spec.InstanceRef.Namespace
-	if instanceNamespace == "" {
-		instanceNamespace = addon.Namespace
+	instanceNamespace := addon.Namespace
+	if addon.Spec.InstanceRef.Namespace != "" && addon.Spec.InstanceRef.Namespace != addon.Namespace {
+		addon.Status.Phase = phaseFailed
+		addon.Status.Ready = false
+		_ = r.Status().Update(ctx, addon)
+		return ctrl.Result{}, nil
 	}
 
 	if addon.Spec.InstanceRef.Name == "" {
@@ -190,6 +194,28 @@ func (r *OdooAddonReconciler) reconcileOdooAddon(ctx context.Context, addon *odo
 	return ctrl.Result{}, nil
 }
 
+var validGitRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
+
+func validateGitUrl(u string) error {
+	allowed := []string{"https://", "http://", "git@", "ssh://"}
+	for _, prefix := range allowed {
+		if strings.HasPrefix(u, prefix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("gitUrl scheme not allowed: %q", u)
+}
+
+func validateGitRef(ref string) error {
+	if strings.Contains(ref, "..") || strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("invalid gitRef: %q", ref)
+	}
+	if !validGitRef.MatchString(ref) {
+		return fmt.Errorf("gitRef contains disallowed characters: %q", ref)
+	}
+	return nil
+}
+
 func (r *OdooAddonReconciler) ensureVolumeMounted(ctx context.Context, instance *odoov1.OdooInstance, pvcName string) (bool, error) {
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: instance.Namespace}, pvc); err != nil {
@@ -207,6 +233,13 @@ func (r *OdooAddonReconciler) ensureVolumeMounted(ctx context.Context, instance 
 }
 
 func (r *OdooAddonReconciler) cloneOrUpdateRepo(gitUrl, gitRef, cloneDir, addonPath string, singleAddon bool) (string, error) {
+	if err := validateGitUrl(gitUrl); err != nil {
+		return "", err
+	}
+	if err := validateGitRef(gitRef); err != nil {
+		return "", err
+	}
+
 	repoDir := cloneDir
 	if !singleAddon && addonPath != "" {
 		repoDir = filepath.Join(cloneDir, addonPath)
@@ -233,7 +266,7 @@ func (r *OdooAddonReconciler) cloneOrUpdateRepo(gitUrl, gitRef, cloneDir, addonP
 		cmd := exec.Command("git", "fetch", "origin")
 		cmd.Dir = repoDir
 		if output, err := cmd.CombinedOutput(); err != nil {
-			addonLogger.Info("Git fetch warning (continuing): " + string(output))
+			return "", fmt.Errorf("git fetch failed: %w, output: %s", err, string(output))
 		}
 
 		cmd = exec.Command("git", "checkout", gitRef)
@@ -245,7 +278,7 @@ func (r *OdooAddonReconciler) cloneOrUpdateRepo(gitUrl, gitRef, cloneDir, addonP
 		cmd = exec.Command("git", "pull", "origin", gitRef)
 		cmd.Dir = repoDir
 		if output, err := cmd.CombinedOutput(); err != nil {
-			addonLogger.Info("Git pull warning (continuing): " + string(output))
+			return "", fmt.Errorf("git pull failed: %w, output: %s", err, string(output))
 		}
 	}
 
@@ -261,10 +294,23 @@ func (r *OdooAddonReconciler) cloneOrUpdateRepo(gitUrl, gitRef, cloneDir, addonP
 
 func (r *OdooAddonReconciler) handleFinalizer(ctx context.Context, addon *odoov1.OdooAddon) error {
 	if controllerutil.ContainsFinalizer(addon, finalizerOdooAddon) {
-		controllerutil.RemoveFinalizer(addon, finalizerOdooAddon)
-		if err := r.Update(ctx, addon); err != nil {
-			return err
+		if addon.Spec.InstanceRef.Name != "" {
+			instance := &odoov1.OdooInstance{}
+			nsName := types.NamespacedName{Name: addon.Spec.InstanceRef.Name, Namespace: addon.Namespace}
+			if err := r.Get(ctx, nsName, instance); err == nil {
+				targetPath := filepath.Join(cloneMountPath, addon.Name)
+				updated := instance.Status.AddonPaths[:0]
+				for _, p := range instance.Status.AddonPaths {
+					if p != targetPath {
+						updated = append(updated, p)
+					}
+				}
+				instance.Status.AddonPaths = updated
+				_ = r.Status().Update(ctx, instance)
+			}
 		}
+		controllerutil.RemoveFinalizer(addon, finalizerOdooAddon)
+		return r.Update(ctx, addon)
 	}
 	return nil
 }

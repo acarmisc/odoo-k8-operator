@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -36,7 +37,7 @@ import (
 )
 
 const (
-	finalizerOdooInstance = "odoo.operator.io/finalizer"
+	finalizerOdooInstance = "odoo.operator.io/instance-finalizer"
 	defaultOdooImage      = "odoo:19.0"
 )
 
@@ -104,8 +105,23 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		return err
 	}
 
-	instance.Status.Phase = "Running"
-	instance.Status.Ready = true
+	deploy := &appsv1.Deployment{}
+	if getErr := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, deploy); getErr == nil {
+		desired := int32(1)
+		if instance.Spec.Replicas > 0 {
+			desired = instance.Spec.Replicas
+		}
+		if deploy.Status.ReadyReplicas >= desired {
+			instance.Status.Phase = "Running"
+			instance.Status.Ready = true
+		} else {
+			instance.Status.Phase = "Creating"
+			instance.Status.Ready = false
+		}
+	} else {
+		instance.Status.Phase = "Creating"
+		instance.Status.Ready = false
+	}
 	if err := r.Status().Update(ctx, instance); err != nil {
 		return err
 	}
@@ -174,7 +190,14 @@ func (r *OdooInstanceReconciler) reconcileConfigMap(ctx context.Context, instanc
 		odooConfig := "[options]\n"
 		odooConfig += "addons_path = /mnt/odoo/addons\n"
 
+		blockedConfigKeys := map[string]bool{"admin_passwd": true, "db_password": true, "dbfilter": true}
 		for key, value := range instance.Spec.Config {
+			if blockedConfigKeys[key] {
+				return fmt.Errorf("config key %q is not permitted in spec.config", key)
+			}
+			if strings.ContainsAny(value, "\n\r") {
+				return fmt.Errorf("config value for key %q contains illegal newline characters", key)
+			}
 			odooConfig += fmt.Sprintf("%s = %s\n", key, value)
 		}
 
@@ -184,15 +207,6 @@ func (r *OdooInstanceReconciler) reconcileConfigMap(ctx context.Context, instanc
 			odooConfig += fmt.Sprintf("db_name = %s\n", instance.Spec.Postgres.Database)
 			odooConfig += fmt.Sprintf("db_user = %s\n", instance.Spec.Postgres.User)
 			odooConfig += "db_sslmode = require\n"
-			if instance.Spec.Postgres.PasswordSecret != "" {
-				secret := &corev1.Secret{}
-				if err := r.Get(ctx, types.NamespacedName{
-					Name:      instance.Spec.Postgres.PasswordSecret,
-					Namespace: instance.Namespace,
-				}, secret); err == nil {
-					odooConfig += fmt.Sprintf("db_password = %s\n", string(secret.Data["password"]))
-				}
-			}
 		}
 
 		if cm.Data == nil {
@@ -224,10 +238,35 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 		replicas = 1
 	}
 
+	resources := instance.Spec.Resources
+	if resources.Requests == nil && resources.Limits == nil {
+		resources = corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+		}
+	}
+
 	var envVars []corev1.EnvVar
 	if instance.Spec.Postgres.PasswordSecret != "" {
 		envVars = append(envVars, corev1.EnvVar{
 			Name: "PGPASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: instance.Spec.Postgres.PasswordSecret,
+					},
+					Key: "password",
+				},
+			},
+		})
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "DB_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{
@@ -268,11 +307,23 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 				Labels: podLabels,
 			},
 			Spec: corev1.PodSpec{
+				SecurityContext: &corev1.PodSecurityContext{
+					RunAsNonRoot: func() *bool { b := true; return &b }(),
+					SeccompProfile: &corev1.SeccompProfile{
+						Type: corev1.SeccompProfileTypeRuntimeDefault,
+					},
+				},
 				Containers: []corev1.Container{
 					{
 						Name:  "odoo",
 						Image: image,
 						Args:  buildOdooArgs(instance),
+						SecurityContext: &corev1.SecurityContext{
+							AllowPrivilegeEscalation: func() *bool { b := false; return &b }(),
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{"ALL"},
+							},
+						},
 						Ports: []corev1.ContainerPort{
 							{ContainerPort: 8069, Name: "odoo"},
 						},
@@ -289,7 +340,7 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 							},
 						},
 						Env:       envVars,
-						Resources: instance.Spec.Resources,
+						Resources: resources,
 					},
 				},
 				Volumes: []corev1.Volume{

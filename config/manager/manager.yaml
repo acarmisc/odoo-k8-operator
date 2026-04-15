@@ -63,6 +63,8 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+        # TODO: Pin to immutable digest in production: ghcr.io/<org>/odoo-k8-operator@sha256:<digest>
+        # Use IMG= variable with `make deploy IMG=...` to override at deploy time.
         image: controller:latest
         name: manager
         ports: []

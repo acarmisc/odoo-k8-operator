@@ -81,6 +81,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	var enableWebhooks bool
+	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
+		"Enable admission webhooks (requires TLS certs — use with cert-manager)")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -216,9 +219,11 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "OdooAddon")
 		os.Exit(1)
 	}
-	if err := (&odoov1.OdooAddonValidator{}).SetupWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "OdooAddon")
-		os.Exit(1)
+	if enableWebhooks {
+		if err := (&odoov1.OdooAddonValidator{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "OdooAddon")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 

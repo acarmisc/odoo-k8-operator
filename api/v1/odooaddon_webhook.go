@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -38,19 +39,27 @@ func (v *OdooAddonValidator) SetupWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-var _ admission.CustomValidator[*OdooAddon] = &OdooAddonValidator{}
+var _ admission.CustomValidator = &OdooAddonValidator{}
 
 var validAddonGitRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
 
-func (v *OdooAddonValidator) ValidateCreate(ctx context.Context, obj *OdooAddon) (admission.Warnings, error) {
-	return nil, validateOdooAddonSpec(obj)
+func (v *OdooAddonValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	addon, ok := obj.(*OdooAddon)
+	if !ok {
+		return nil, fmt.Errorf("expected OdooAddon but got %T", obj)
+	}
+	return nil, validateOdooAddonSpec(addon)
 }
 
-func (v *OdooAddonValidator) ValidateUpdate(ctx context.Context, oldObj *OdooAddon, newObj *OdooAddon) (admission.Warnings, error) {
-	return nil, validateOdooAddonSpec(newObj)
+func (v *OdooAddonValidator) ValidateUpdate(ctx context.Context, oldObj runtime.Object, newObj runtime.Object) (admission.Warnings, error) {
+	addon, ok := newObj.(*OdooAddon)
+	if !ok {
+		return nil, fmt.Errorf("expected OdooAddon but got %T", newObj)
+	}
+	return nil, validateOdooAddonSpec(addon)
 }
 
-func (v *OdooAddonValidator) ValidateDelete(ctx context.Context, obj *OdooAddon) (admission.Warnings, error) {
+func (v *OdooAddonValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	return nil, nil
 }
 

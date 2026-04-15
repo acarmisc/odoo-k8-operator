@@ -42,6 +42,9 @@ import (
 const (
 	finalizerOdooInstance = "odoo.operator.io/instance-finalizer"
 	defaultOdooImage      = "odoo:19.0"
+	phaseCreating         = "Creating"
+	phaseRunning          = "Running"
+	phaseFailing          = "Failed"
 )
 
 var odooLogger = logf.Log.WithName("controller_odooinstance")
@@ -78,7 +81,7 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	err = r.reconcileOdooInstance(ctx, instance)
 	if err != nil {
 		odooLogger.Error(err, "Failed to reconcile OdooInstance")
-		instance.Status.Phase = "Failed"
+		instance.Status.Phase = phaseFailing
 		instance.Status.Ready = false
 		if statusErr := r.Status().Update(ctx, instance); statusErr != nil {
 			odooLogger.Error(statusErr, "Failed to update instance status")
@@ -89,7 +92,7 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, instance *odoov1.OdooInstance) error {
-	instance.Status.Phase = "Creating"
+	instance.Status.Phase = phaseCreating
 	instance.Status.ObservedGeneration = instance.Generation
 
 	if err := r.reconcilePVC(ctx, instance); err != nil {
@@ -132,14 +135,14 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 			desired = instance.Spec.Replicas
 		}
 		if deploy.Status.ReadyReplicas >= desired {
-			instance.Status.Phase = "Running"
+			instance.Status.Phase = phaseRunning
 			instance.Status.Ready = true
 		} else {
-			instance.Status.Phase = "Creating"
+			instance.Status.Phase = phaseCreating
 			instance.Status.Ready = false
 		}
 	} else {
-		instance.Status.Phase = "Creating"
+		instance.Status.Phase = phaseCreating
 		instance.Status.Ready = false
 	}
 	if err := r.Status().Update(ctx, instance); err != nil {

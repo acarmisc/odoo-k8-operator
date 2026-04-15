@@ -22,7 +22,7 @@ import (
 )
 
 type OdooInstanceSpec struct {
-	Image     string                      `json:"image,omitempty"`
+	Image string `json:"image,omitempty"`
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	Replicas  int32                       `json:"replicas,omitempty"`
@@ -40,7 +40,7 @@ type AddonVolumeSpec struct {
 }
 
 type PostgresSpec struct {
-	Host           string `json:"host,omitempty"`
+	Host string `json:"host,omitempty"`
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	Port           int32  `json:"port,omitempty"`

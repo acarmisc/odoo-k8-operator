@@ -37,7 +37,7 @@ import (
 
 const (
 	finalizerOdooInstance = "odoo.operator.io/finalizer"
-	defaultOdooImage      = "odoo:17.0"
+	defaultOdooImage      = "odoo:18.0"
 )
 
 var odooLogger = logf.Log.WithName("controller_odooinstance")

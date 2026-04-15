@@ -332,6 +332,7 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 			Spec: corev1.PodSpec{
 				SecurityContext: &corev1.PodSecurityContext{
 					RunAsNonRoot: func() *bool { b := true; return &b }(),
+					RunAsUser:    func() *int64 { u := int64(100); return &u }(),
 					SeccompProfile: &corev1.SeccompProfile{
 						Type: corev1.SeccompProfileTypeRuntimeDefault,
 					},

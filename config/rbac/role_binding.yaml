@@ -1,10 +1,14 @@
+# RoleBinding scopes the operator to the deployment namespace.
+# For multi-namespace operation, create additional RoleBindings
+# in each namespace where OdooInstance/OdooAddon resources will be managed.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   labels:
     app.kubernetes.io/name: odoo-k8-operator
     app.kubernetes.io/managed-by: kustomize
   name: manager-rolebinding
+  namespace: system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

@@ -170,27 +170,6 @@ func (r *OdooAddonReconciler) reconcileOdooAddon(ctx context.Context, addon *odo
 		return ctrl.Result{}, err
 	}
 
-	addonPaths := instance.Status.AddonPaths
-	newPath := cloneDir
-	if !singleAddon && addonPath != "" {
-		newPath = filepath.Join(cloneDir, addonPath)
-	}
-
-	found := false
-	for _, p := range addonPaths {
-		if p == newPath {
-			found = true
-			break
-		}
-	}
-	if !found {
-		addonPaths = append(addonPaths, newPath)
-		instance.Status.AddonPaths = addonPaths
-		if err := r.Status().Update(ctx, instance); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
 	return ctrl.Result{}, nil
 }
 

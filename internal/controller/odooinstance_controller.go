@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -31,7 +32,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	odoov1 "github.com/odoo-k8s/odoo-k8-operator/api/v1"
 )
@@ -103,6 +106,23 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 
 	if err := r.reconcileService(ctx, instance); err != nil {
 		return err
+	}
+
+	// Derive addonPaths from Synced OdooAddon objects — avoids cross-controller status write race
+	addonList := &odoov1.OdooAddonList{}
+	if listErr := r.List(ctx, addonList, client.InNamespace(instance.Namespace)); listErr == nil {
+		var paths []string
+		for i := range addonList.Items {
+			a := &addonList.Items[i]
+			if a.Spec.InstanceRef.Name == instance.Name && a.Status.Ready {
+				path := filepath.Join(cloneMountPath, a.Name)
+				if !a.Spec.SingleAddon && a.Spec.AddonPath != "" {
+					path = filepath.Join(path, a.Spec.AddonPath)
+				}
+				paths = append(paths, path)
+			}
+		}
+		instance.Status.AddonPaths = paths
 	}
 
 	deploy := &appsv1.Deployment{}
@@ -429,6 +449,21 @@ func (r *OdooInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ConfigMap{}).
+		Watches(
+			&odoov1.OdooAddon{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				addon, ok := obj.(*odoov1.OdooAddon)
+				if !ok || addon.Spec.InstanceRef.Name == "" {
+					return nil
+				}
+				return []reconcile.Request{{
+					NamespacedName: types.NamespacedName{
+						Name:      addon.Spec.InstanceRef.Name,
+						Namespace: addon.Namespace,
+					},
+				}}
+			}),
+		).
 		Named("odooinstance").
 		Complete(r)
 }

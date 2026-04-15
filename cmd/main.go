@@ -216,6 +216,10 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "OdooAddon")
 		os.Exit(1)
 	}
+	if err := (&odoov1.OdooAddonValidator{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "OdooAddon")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {

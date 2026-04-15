@@ -5,13 +5,16 @@ metadata:
     app.kubernetes.io/name: odoo-k8-operator
     app.kubernetes.io/managed-by: kustomize
   name: manager-role
+  # ClusterRole used with namespace-scoped RoleBinding(s).
+  # Grants access only within namespaces where a RoleBinding references this role.
+  # Do NOT bind with a ClusterRoleBinding in production — use per-namespace RoleBindings.
 rules:
 - apiGroups: [""]
   resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: [""]
   resources: ["secrets"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["get"]
 - apiGroups: ["apps"]
   resources: ["deployments"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

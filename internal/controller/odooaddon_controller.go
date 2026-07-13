@@ -458,7 +458,7 @@ func (r *OdooAddonReconciler) readJobLogs(ctx context.Context, namespace, jobNam
 	if err != nil {
 		return "", err
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 	data, err := io.ReadAll(stream)
 	if err != nil {
 		return "", err

@@ -68,6 +68,8 @@ spec:
                 required:
                 - name
                 type: object
+              moduleName:
+                type: string
               readOnly:
                 type: boolean
               singleAddon:

@@ -111,18 +111,20 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		return err
 	}
 
-	// Derive addonPaths from Synced OdooAddon objects — avoids cross-controller status write race
+	// Derive addonPaths from Synced OdooAddon objects — avoids cross-controller status write race.
+	// Every synced module lands directly under addonsMountPath (see odooaddon_controller.go);
+	// for a singleAddon repo the module folder is moduleName (defaulting to the addon's own name).
 	addonList := &odoov1.OdooAddonList{}
 	if listErr := r.List(ctx, addonList, client.InNamespace(instance.Namespace)); listErr == nil {
 		var paths []string
 		for i := range addonList.Items {
 			a := &addonList.Items[i]
 			if a.Spec.InstanceRef.Name == instance.Name && a.Status.Ready {
-				path := filepath.Join(cloneMountPath, a.Name)
-				if !a.Spec.SingleAddon && a.Spec.AddonPath != "" {
-					path = filepath.Join(path, a.Spec.AddonPath)
+				moduleName := a.Spec.ModuleName
+				if moduleName == "" {
+					moduleName = a.Name
 				}
-				paths = append(paths, path)
+				paths = append(paths, filepath.Join(addonsMountPath, moduleName))
 			}
 		}
 		instance.Status.AddonPaths = paths

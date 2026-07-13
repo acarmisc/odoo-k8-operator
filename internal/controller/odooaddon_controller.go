@@ -49,11 +49,11 @@ const (
 
 	phaseFailed  = "Failed"
 	phasePending = "Pending"
-	phaseCloning = "Cloning"
 	phaseSynced  = "Synced"
 
 	syncJobImage   = "alpine/git:2.45.2"
 	resyncInterval = 5 * time.Minute
+	failureBackoff = 30 * time.Second
 	jobWaitTimeout = 3 * time.Minute
 )
 
@@ -121,28 +121,36 @@ func (r *OdooAddonReconciler) reconcileOdooAddon(ctx context.Context, addon *odo
 		return r.pending(ctx, addon)
 	}
 
-	// Resync periodically (picks up upstream git changes) instead of only once.
-	if addon.Status.Phase == phaseSynced && addon.Status.LastSyncTime != nil {
-		if elapsed := time.Since(addon.Status.LastSyncTime.Time); elapsed < resyncInterval {
-			return ctrl.Result{RequeueAfter: resyncInterval - elapsed}, nil
+	// Cooldown gate covering both success and failure outcomes. Any Status().Update()
+	// below self-triggers another Reconcile via the watch on OdooAddon itself - that
+	// happens immediately, regardless of what RequeueAfter we return - so without this
+	// check a failing (or even succeeding) sync would retry-loop tightly forever,
+	// endlessly deleting and recreating the sync Job before it ever finishes.
+	if addon.Status.LastSyncTime != nil {
+		interval := resyncInterval
+		if addon.Status.Phase == phaseFailed {
+			interval = failureBackoff
+		}
+		if elapsed := time.Since(addon.Status.LastSyncTime.Time); elapsed < interval {
+			return ctrl.Result{RequeueAfter: interval - elapsed}, nil
 		}
 	}
 
-	addon.Status.Phase = phaseCloning
-	if err := r.Status().Update(ctx, addon); err != nil {
-		return ctrl.Result{}, err
-	}
-
+	// Deliberately no intermediate "Cloning" status write here: runSyncJob blocks
+	// synchronously for the whole sync, and a status write mid-flight would trigger
+	// the self-reconcile described above before LastSyncTime records this attempt.
 	nodeName := r.odooPodNode(ctx, instance)
 
-	commitHash, err := r.runSyncJob(ctx, addon, pvcName, nodeName)
-	if err != nil {
-		return r.fail(ctx, addon, err)
+	commitHash, syncErr := r.runSyncJob(ctx, addon, pvcName, nodeName)
+
+	now := metav1.Now()
+	addon.Status.LastSyncTime = &now
+
+	if syncErr != nil {
+		return r.fail(ctx, addon, syncErr)
 	}
 
 	addon.Status.ClonedCommit = commitHash
-	now := metav1.Now()
-	addon.Status.LastSyncTime = &now
 	addon.Status.Phase = phaseSynced
 	addon.Status.Ready = true
 	if err := r.Status().Update(ctx, addon); err != nil {
@@ -156,10 +164,14 @@ func (r *OdooAddonReconciler) fail(ctx context.Context, addon *odoov1.OdooAddon,
 	addonLogger.Error(cause, "OdooAddon sync failed", "addon", addon.Name)
 	addon.Status.Phase = phaseFailed
 	addon.Status.Ready = false
+	if addon.Status.LastSyncTime == nil {
+		now := metav1.Now()
+		addon.Status.LastSyncTime = &now
+	}
 	if statusErr := r.Status().Update(ctx, addon); statusErr != nil {
 		addonLogger.Error(statusErr, "Failed to update addon status")
 	}
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, cause
+	return ctrl.Result{RequeueAfter: failureBackoff}, cause
 }
 
 func (r *OdooAddonReconciler) pending(ctx context.Context, addon *odoov1.OdooAddon) (ctrl.Result, error) {

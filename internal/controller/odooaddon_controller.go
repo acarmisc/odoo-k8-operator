@@ -171,7 +171,10 @@ func (r *OdooAddonReconciler) fail(ctx context.Context, addon *odoov1.OdooAddon,
 	if statusErr := r.Status().Update(ctx, addon); statusErr != nil {
 		addonLogger.Error(statusErr, "Failed to update addon status")
 	}
-	return ctrl.Result{RequeueAfter: failureBackoff}, cause
+	// Returning cause here (instead of nil) would make controller-runtime discard
+	// RequeueAfter and retry on its own fast exponential backoff instead, defeating
+	// the LastSyncTime cooldown gate above - cause is already logged, so return nil.
+	return ctrl.Result{RequeueAfter: failureBackoff}, nil
 }
 
 func (r *OdooAddonReconciler) pending(ctx context.Context, addon *odoov1.OdooAddon) (ctrl.Result, error) {
@@ -412,6 +415,12 @@ func (r *OdooAddonReconciler) waitForJob(ctx context.Context, namespace, jobName
 	for time.Now().Before(deadline) {
 		job := &batchv1.Job{}
 		if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job); err != nil {
+			// The Job we just created may not be visible yet through the client's cache
+			// (informer sync lag) - treat NotFound as "not ready", not a hard failure.
+			if errors.IsNotFound(err) {
+				time.Sleep(time.Second)
+				continue
+			}
 			return "", err
 		}
 		if job.Status.Succeeded > 0 {

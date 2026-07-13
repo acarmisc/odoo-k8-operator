@@ -153,7 +153,16 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 }
 
 func (r *OdooInstanceReconciler) reconcilePVC(ctx context.Context, instance *odoov1.OdooInstance) error {
-	pvcName := fmt.Sprintf("%s-addons", instance.Name)
+	defaultClass := "standard"
+	if err := r.reconcileSinglePVC(ctx, instance, fmt.Sprintf("%s-addons", instance.Name),
+		instance.Spec.Addons.StorageClass, instance.Spec.Addons.Size, "10Gi", &defaultClass); err != nil {
+		return err
+	}
+	return r.reconcileSinglePVC(ctx, instance, fmt.Sprintf("%s-data", instance.Name),
+		instance.Spec.Data.StorageClass, instance.Spec.Data.Size, "5Gi", &defaultClass)
+}
+
+func (r *OdooInstanceReconciler) reconcileSinglePVC(ctx context.Context, instance *odoov1.OdooInstance, pvcName string, storageClass *string, size string, defaultSize string, defaultClass *string) error {
 	pvc := &corev1.PersistentVolumeClaim{}
 	err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: instance.Namespace}, pvc)
 	if err == nil {
@@ -164,15 +173,12 @@ func (r *OdooInstanceReconciler) reconcilePVC(ctx context.Context, instance *odo
 		return err
 	}
 
-	storageClass := instance.Spec.Addons.StorageClass
 	if storageClass == nil {
-		defaultClass := "standard"
-		storageClass = &defaultClass
+		storageClass = defaultClass
 	}
 
-	size := instance.Spec.Addons.Size
 	if size == "" {
-		size = "10Gi"
+		size = defaultSize
 	}
 
 	newPVC := &corev1.PersistentVolumeClaim{
@@ -333,6 +339,7 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 				SecurityContext: &corev1.PodSecurityContext{
 					RunAsNonRoot: func() *bool { b := true; return &b }(),
 					RunAsUser:    func() *int64 { u := int64(100); return &u }(),
+					FSGroup:      func() *int64 { g := int64(100); return &g }(),
 					SeccompProfile: &corev1.SeccompProfile{
 						Type: corev1.SeccompProfileTypeRuntimeDefault,
 					},
@@ -362,6 +369,10 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 								MountPath: "/mnt/odoo/addons",
 								ReadOnly:  true,
 							},
+							{
+								Name:      "data",
+								MountPath: "/var/lib/odoo",
+							},
 						},
 						Env:       envVars,
 						Resources: resources,
@@ -384,6 +395,14 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 								ClaimName: fmt.Sprintf("%s-addons", instance.Name),
 								ReadOnly:  true,
+							},
+						},
+					},
+					{
+						Name: "data",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: fmt.Sprintf("%s-data", instance.Name),
 							},
 						},
 					},

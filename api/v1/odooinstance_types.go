@@ -29,12 +29,22 @@ type OdooInstanceSpec struct {
 	Version   string                      `json:"version,omitempty"`
 	Edition   string                      `json:"edition,omitempty"`
 	Addons    AddonVolumeSpec             `json:"addonsVolume,omitempty"`
+	Data      DataVolumeSpec              `json:"dataVolume,omitempty"`
 	Postgres  PostgresSpec                `json:"postgres,omitempty"`
 	Config    map[string]string           `json:"config,omitempty"`
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 type AddonVolumeSpec struct {
+	StorageClass *string `json:"storageClass,omitempty"`
+	Size         string  `json:"size,omitempty"`
+}
+
+// DataVolumeSpec configures persistent storage for Odoo's data_dir
+// (filestore, sessions) mounted at /var/lib/odoo. Without this, attachments
+// such as product images live on the pod's ephemeral filesystem and are
+// lost on every restart.
+type DataVolumeSpec struct {
 	StorageClass *string `json:"storageClass,omitempty"`
 	Size         string  `json:"size,omitempty"`
 }

@@ -61,6 +61,18 @@ spec:
                 additionalProperties:
                   type: string
                 type: object
+              dataVolume:
+                description: |-
+                  DataVolumeSpec configures persistent storage for Odoo's data_dir
+                  (filestore, sessions) mounted at /var/lib/odoo. Without this, attachments
+                  such as product images live on the pod's ephemeral filesystem and are
+                  lost on every restart.
+                properties:
+                  size:
+                    type: string
+                  storageClass:
+                    type: string
+                type: object
               edition:
                 type: string
               image:

@@ -157,6 +157,58 @@ The operator creates a persistent volume for addons:
 - **Odoo Pods**: Mount the volume as READ-ONLY
 - **Operator**: Has READ-WRITE access to sync Git repositories
 
+## CI/CD
+
+GitHub Actions workflows live in `.github/workflows/`:
+
+| Workflow | Triggers | What it does |
+|----------|----------|--------------|
+| `lint.yml` | push to `main`, tags `v*`, all PRs | golangci-lint |
+| `test.yml` | push to `main`, tags `v*`, all PRs | `make test`, verifies generated files and `go.mod`/`go.sum` are committed and tidy, uploads `cover.out`; `govulncheck ./...` in a separate job |
+| `test-e2e.yml` | push to `main`, tags `v*`, PRs to `main` | Creates a pinned kind cluster and runs `make test-e2e`; uploads kind logs on failure |
+| `build.yml` | push to `main`, tags `v*`, PRs to `main` | Builds a multi-arch (amd64, arm64) image. On non-PR events it scans the amd64 image with Trivy (fails on HIGH/CRITICAL fixable vulnerabilities), pushes to GHCR with SBOM and provenance, and signs the digest with cosign (keyless) |
+
+Dependabot (`.github/dependabot.yml`) opens weekly updates for Go modules (Kubernetes modules grouped), GitHub Actions and the Docker base images.
+
+Generated files (CRDs, RBAC, deepcopy) must be committed. CI fails if `make verify-generated` produces a diff. Run it locally before pushing:
+
+```bash
+make verify-generated
+```
+
+### Image tags
+
+Images are published to `ghcr.io/acarmisc/odoo-k8-operator`:
+
+| Event | Tags |
+|-------|------|
+| push to `main` | `main`, `sha-<short-sha>` |
+| tag `vX.Y.Z` | `vX.Y.Z`, `X.Y`, `sha-<short-sha>`, `latest` |
+| tag `vX.Y.Z-<pre>` | `vX.Y.Z-<pre>`, `X.Y`, `sha-<short-sha>` (no `latest`) |
+| pull request | built, not pushed |
+
+### Cutting a release
+
+1. Make sure `main` is green and generated files are up to date.
+2. Tag and push:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+3. The `build.yml` workflow publishes and signs the image. Tags are never cancelled by newer runs.
+
+### Verifying the image signature
+
+Images are signed keylessly with cosign using the GitHub Actions OIDC identity. To verify:
+
+```bash
+cosign verify ghcr.io/acarmisc/odoo-k8-operator:v0.1.0 \
+  --certificate-identity-regexp 'https://github.com/acarmisc/odoo-k8-operator/\.github/workflows/build\.yml@refs/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ## License
 
 Apache License 2.0 - See [LICENSE](LICENSE) for details.

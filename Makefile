@@ -100,6 +100,21 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
+.PHONY: verify-generated
+verify-generated: manifests generate ## Fail if generated files (CRDs, RBAC, deepcopy) are not committed. Used by CI.
+	@git diff --exit-code -- . >/dev/null 2>&1 || { \
+		echo "Generated files are out of date. Run 'make manifests generate' and commit the result:"; \
+		git --no-pager diff --stat -- .; \
+		exit 1; \
+	}
+	@untracked="$$(git ls-files --others --exclude-standard)"; \
+	if [ -n "$$untracked" ]; then \
+		echo "Untracked generated files found. Commit them:"; \
+		echo "$$untracked"; \
+		exit 1; \
+	fi
+	@echo "Generated files are up to date."
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...

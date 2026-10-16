@@ -7,31 +7,59 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  # Pinned kind release and node image. Bump deliberately.
+  KIND_VERSION: v0.29.0
+  KIND_NODE_IMAGE: kindest/node:v1.34.0
+  # Must match KIND_CLUSTER in the Makefile so `setup-test-e2e` reuses the cluster.
+  KIND_CLUSTER: odoo-k8-operator-test-e2e
+
 jobs:
   test-e2e:
-    name: Run on Ubuntu
+    name: e2e on kind
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: Clone the code
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: true
 
-      - name: Install the latest version of kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: ${{ env.KIND_VERSION }}
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+          cluster_name: ${{ env.KIND_CLUSTER }}
+          wait: 120s
 
-      - name: Verify kind installation
-        run: kind version
-
-      - name: Running Test e2e
+      - name: Run e2e tests
         env:
           CERT_MANAGER_INSTALL_SKIP: "true"
-        run: |
-          go mod tidy
-          make test-e2e
+        run: make test-e2e
+
+      - name: Export kind logs on failure
+        if: failure()
+        run: kind export logs "${RUNNER_TEMP}/kind-logs" --name "${KIND_CLUSTER}"
+
+      - name: Upload kind logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-logs
+          path: ${{ runner.temp }}/kind-logs
+          if-no-files-found: warn
+          retention-days: 7

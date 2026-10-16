@@ -21,13 +21,23 @@ COPY internal/ internal/
 # was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a -trimpath -ldflags="-s -w" -o manager cmd/main.go
 
-# Use Alpine as base image with git support for OdooAddon reconciliation
-FROM alpine:3.20
-RUN apk add --no-cache git ca-certificates && \
-    addgroup -g 65532 nonroot && \
-    adduser -u 65532 -G nonroot -D -H nonroot
+# Runtime image: distroless, no shell and no package manager. The operator does not
+# run git itself; git runs inside the sync Jobs.
+FROM gcr.io/distroless/static:nonroot
+
+ARG VERSION=dev
+ARG REVISION=unknown
+
+LABEL org.opencontainers.image.title="odoo-k8-operator" \
+      org.opencontainers.image.description="Odoo Kubernetes Operator" \
+      org.opencontainers.image.source="https://github.com/acarmisc/odoo-k8-operator" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
+
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

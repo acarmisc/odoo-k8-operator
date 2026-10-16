@@ -17,9 +17,14 @@ rules:
   verbs: ["get"]
 - apiGroups: [""]
   resources: ["secrets"]
-  verbs: ["get"]
+  # list/watch are required because the cached client reads Secrets to hash them
+  # and to re-reconcile instances when a referenced password rotates.
+  verbs: ["get", "list", "watch"]
 - apiGroups: ["apps"]
   resources: ["deployments"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["policy"]
+  resources: ["poddisruptionbudgets"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["batch"]
   resources: ["jobs"]

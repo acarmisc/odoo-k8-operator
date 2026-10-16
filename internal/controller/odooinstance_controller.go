@@ -19,16 +19,15 @@ package controller
 import (
 	"context"
 	"fmt"
-	"path/filepath"
-	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -99,43 +98,44 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		return err
 	}
 
-	if err := r.reconcileConfigMap(ctx, instance); err != nil {
+	conf, err := renderOdooConf(&instance.Spec)
+	if err != nil {
+		return err
+	}
+	if err := r.reconcileConfigMap(ctx, instance, conf); err != nil {
 		return err
 	}
 
-	if err := r.reconcileDeployment(ctx, instance); err != nil {
+	secrets, err := r.referencedSecrets(ctx, instance)
+	if err != nil {
 		return err
 	}
+	addons, err := r.listReadyAddons(ctx, instance)
+	if err != nil {
+		return err
+	}
+	hashes := rolloutHashes{
+		config:  configHash(conf),
+		secrets: secretsHash(secrets),
+		addons:  addonsHash(addons),
+	}
 
+	if err := r.reconcileDeployment(ctx, instance, hashes); err != nil {
+		return err
+	}
+	if err := r.reconcilePDB(ctx, instance); err != nil {
+		return err
+	}
 	if err := r.reconcileService(ctx, instance); err != nil {
 		return err
 	}
 
-	// Derive addonPaths from Synced OdooAddon objects — avoids cross-controller status write race.
-	// Every synced module lands directly under addonsMountPath (see odooaddon_controller.go);
-	// for a singleAddon repo the module folder is moduleName (defaulting to the addon's own name).
-	addonList := &odoov1.OdooAddonList{}
-	if listErr := r.List(ctx, addonList, client.InNamespace(instance.Namespace)); listErr == nil {
-		var paths []string
-		for i := range addonList.Items {
-			a := &addonList.Items[i]
-			if a.Spec.InstanceRef.Name == instance.Name && a.Status.Ready {
-				moduleName := a.Spec.ModuleName
-				if moduleName == "" {
-					moduleName = a.Name
-				}
-				paths = append(paths, filepath.Join(addonsMountPath, moduleName))
-			}
-		}
-		instance.Status.AddonPaths = paths
-	}
+	// Derive addonPaths from Synced OdooAddon objects; avoids a cross-controller status write race.
+	instance.Status.AddonPaths = addonMountPaths(addons)
 
 	deploy := &appsv1.Deployment{}
 	if getErr := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, deploy); getErr == nil {
-		desired := int32(1)
-		if instance.Spec.Replicas > 0 {
-			desired = instance.Spec.Replicas
-		}
+		desired := desiredReplicas(&instance.Spec)
 		if deploy.Status.ReadyReplicas >= desired {
 			instance.Status.Phase = phaseRunning
 			instance.Status.Ready = true
@@ -147,68 +147,51 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		instance.Status.Phase = phaseCreating
 		instance.Status.Ready = false
 	}
-	if err := r.Status().Update(ctx, instance); err != nil {
-		return err
-	}
-
-	return nil
+	return r.Status().Update(ctx, instance)
 }
 
-func (r *OdooInstanceReconciler) reconcilePVC(ctx context.Context, instance *odoov1.OdooInstance) error {
-	defaultClass := "standard"
-	if err := r.reconcileSinglePVC(ctx, instance, fmt.Sprintf("%s-addons", instance.Name),
-		instance.Spec.Addons.StorageClass, instance.Spec.Addons.Size, "10Gi", &defaultClass); err != nil {
-		return err
+// referencedSecrets fetches every Secret the pod consumes. A missing Secret is
+// reported by name, because the pod could not start without it either.
+func (r *OdooInstanceReconciler) referencedSecrets(ctx context.Context, instance *odoov1.OdooInstance) ([]*corev1.Secret, error) {
+	refs := []struct {
+		field string
+		name  string
+	}{
+		{"spec.postgres.passwordSecret", instance.Spec.Postgres.PasswordSecret},
+		{"spec.adminPasswordSecret", instance.Spec.AdminPasswordSecret},
 	}
-	return r.reconcileSinglePVC(ctx, instance, fmt.Sprintf("%s-data", instance.Name),
-		instance.Spec.Data.StorageClass, instance.Spec.Data.Size, "5Gi", &defaultClass)
+
+	secrets := make([]*corev1.Secret, 0, len(refs))
+	for _, ref := range refs {
+		if ref.name == "" {
+			continue
+		}
+		secret := &corev1.Secret{}
+		key := types.NamespacedName{Name: ref.name, Namespace: instance.Namespace}
+		if err := r.Get(ctx, key, secret); err != nil {
+			if errors.IsNotFound(err) {
+				return nil, fmt.Errorf("secret %q referenced by %s does not exist in namespace %q", ref.name, ref.field, instance.Namespace)
+			}
+			return nil, fmt.Errorf("get secret %q: %w", ref.name, err)
+		}
+		secrets = append(secrets, secret)
+	}
+	return secrets, nil
 }
 
-func (r *OdooInstanceReconciler) reconcileSinglePVC(ctx context.Context, instance *odoov1.OdooInstance, pvcName string, storageClass *string, size string, defaultSize string, defaultClass *string) error {
-	pvc := &corev1.PersistentVolumeClaim{}
-	err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: instance.Namespace}, pvc)
-	if err == nil {
-		// PVC already exists — spec is immutable once bound, nothing to update
-		return nil
+// listReadyAddons returns the ready OdooAddons bound to this instance.
+func (r *OdooInstanceReconciler) listReadyAddons(ctx context.Context, instance *odoov1.OdooInstance) ([]odoov1.OdooAddon, error) {
+	list := &odoov1.OdooAddonList{}
+	if err := r.List(ctx, list, client.InNamespace(instance.Namespace)); err != nil {
+		return nil, err
 	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	if storageClass == nil {
-		storageClass = defaultClass
-	}
-
-	if size == "" {
-		size = defaultSize
-	}
-
-	newPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pvcName,
-			Namespace: instance.Namespace,
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: resource.MustParse(size),
-				},
-			},
-			StorageClassName: storageClass,
-		},
-	}
-	if err := controllerutil.SetControllerReference(instance, newPVC, r.Scheme); err != nil {
-		return err
-	}
-	return r.Create(ctx, newPVC)
+	return filterReadyAddons(list.Items, instance.Name), nil
 }
 
-func (r *OdooInstanceReconciler) reconcileConfigMap(ctx context.Context, instance *odoov1.OdooInstance) error {
-	cmName := fmt.Sprintf("%s-config", instance.Name)
+func (r *OdooInstanceReconciler) reconcileConfigMap(ctx context.Context, instance *odoov1.OdooInstance, conf string) error {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cmName,
+			Name:      configMapName(instance.Name),
 			Namespace: instance.Namespace,
 		},
 	}
@@ -217,102 +200,19 @@ func (r *OdooInstanceReconciler) reconcileConfigMap(ctx context.Context, instanc
 		if err := controllerutil.SetControllerReference(instance, cm, r.Scheme); err != nil {
 			return err
 		}
-
-		odooConfig := "[options]\n"
-		odooConfig += "addons_path = /mnt/odoo/addons\n"
-
-		blockedConfigKeys := map[string]bool{"admin_passwd": true, "db_password": true, "dbfilter": true}
-		for key, value := range instance.Spec.Config {
-			if blockedConfigKeys[key] {
-				return fmt.Errorf("config key %q is not permitted in spec.config", key)
-			}
-			if strings.ContainsAny(value, "\n\r") {
-				return fmt.Errorf("config value for key %q contains illegal newline characters", key)
-			}
-			odooConfig += fmt.Sprintf("%s = %s\n", key, value)
-		}
-
-		if instance.Spec.Postgres.Database != "" {
-			odooConfig += fmt.Sprintf("db_host = %s\n", instance.Spec.Postgres.Host)
-			odooConfig += fmt.Sprintf("db_port = %d\n", instance.Spec.Postgres.Port)
-			odooConfig += fmt.Sprintf("db_name = %s\n", instance.Spec.Postgres.Database)
-			odooConfig += fmt.Sprintf("db_user = %s\n", instance.Spec.Postgres.User)
-			odooConfig += "db_sslmode = require\n"
-		}
-
-		if cm.Data == nil {
-			cm.Data = make(map[string]string)
-		}
-		cm.Data["odoo.conf"] = odooConfig
+		cm.Data = map[string]string{confFileName: conf}
 		return nil
 	})
 
 	return err
 }
 
-func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instance *odoov1.OdooInstance) error {
-	deployName := instance.Name
+func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instance *odoov1.OdooInstance, hashes rolloutHashes) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      deployName,
+			Name:      instance.Name,
 			Namespace: instance.Namespace,
 		},
-	}
-
-	image := instance.Spec.Image
-	if image == "" {
-		image = defaultOdooImage
-	}
-
-	replicas := instance.Spec.Replicas
-	if replicas < 1 {
-		replicas = 1
-	}
-
-	resources := instance.Spec.Resources
-	if resources.Requests == nil && resources.Limits == nil {
-		resources = corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("250m"),
-				corev1.ResourceMemory: resource.MustParse("512Mi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("1"),
-				corev1.ResourceMemory: resource.MustParse("1Gi"),
-			},
-		}
-	}
-
-	var envVars []corev1.EnvVar
-	if instance.Spec.Postgres.PasswordSecret != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name: "PGPASSWORD",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: instance.Spec.Postgres.PasswordSecret,
-					},
-					Key: "password",
-				},
-			},
-		})
-		envVars = append(envVars, corev1.EnvVar{
-			Name: "DB_PASSWORD",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: instance.Spec.Postgres.PasswordSecret,
-					},
-					Key: "password",
-				},
-			},
-		})
-	}
-	if instance.Spec.Postgres.Database != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  "PGSSLMODE",
-			Value: "require",
-		})
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
@@ -320,109 +220,60 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 			return err
 		}
 
+		replicas := desiredReplicas(&instance.Spec)
+		deploy.Labels = podLabels(instance.Name)
 		deploy.Spec.Replicas = &replicas
-		deploy.Spec.Selector = &metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				"app":      "odoo",
-				"instance": instance.Name,
-			},
-		}
-
-		podLabels := map[string]string{
-			"app":      "odoo",
-			"instance": instance.Name,
-		}
-
-		deploy.Spec.Template = corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{
-				Labels: podLabels,
-			},
-			Spec: corev1.PodSpec{
-				SecurityContext: &corev1.PodSecurityContext{
-					RunAsNonRoot: func() *bool { b := true; return &b }(),
-					RunAsUser:    func() *int64 { u := int64(100); return &u }(),
-					FSGroup:      func() *int64 { g := int64(100); return &g }(),
-					SeccompProfile: &corev1.SeccompProfile{
-						Type: corev1.SeccompProfileTypeRuntimeDefault,
-					},
-				},
-				Containers: []corev1.Container{
-					{
-						Name:  "odoo",
-						Image: image,
-						Args:  buildOdooArgs(instance),
-						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: func() *bool { b := false; return &b }(),
-							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{"ALL"},
-							},
-						},
-						Ports: []corev1.ContainerPort{
-							{ContainerPort: 8069, Name: "odoo"},
-						},
-						VolumeMounts: []corev1.VolumeMount{
-							{
-								Name:      "odoo-config",
-								MountPath: "/etc/odoo",
-								ReadOnly:  true,
-							},
-							{
-								Name:      "addons",
-								MountPath: "/mnt/odoo/addons",
-								ReadOnly:  true,
-							},
-							{
-								Name:      "data",
-								MountPath: "/var/lib/odoo",
-							},
-						},
-						Env:       envVars,
-						Resources: resources,
-					},
-				},
-				Volumes: []corev1.Volume{
-					{
-						Name: "odoo-config",
-						VolumeSource: corev1.VolumeSource{
-							ConfigMap: &corev1.ConfigMapVolumeSource{
-								LocalObjectReference: corev1.LocalObjectReference{
-									Name: fmt.Sprintf("%s-config", instance.Name),
-								},
-							},
-						},
-					},
-					{
-						Name: "addons",
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-								ClaimName: fmt.Sprintf("%s-addons", instance.Name),
-								ReadOnly:  true,
-							},
-						},
-					},
-					{
-						Name: "data",
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-								ClaimName: fmt.Sprintf("%s-data", instance.Name),
-							},
-						},
-					},
-				},
-			},
-		}
-
+		deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: selectorLabels(instance.Name)}
+		deploy.Spec.Strategy = deploymentStrategy(replicas, instance.Spec.Data.AccessMode)
+		deploy.Spec.Template = buildPodTemplate(instance, hashes)
 		return nil
 	})
 
 	return err
 }
 
+// reconcilePDB keeps a PodDisruptionBudget only while there is more than one
+// replica, so a node drain cannot take every pod down at once.
+func (r *OdooInstanceReconciler) reconcilePDB(ctx context.Context, instance *odoov1.OdooInstance) error {
+	if desiredReplicas(&instance.Spec) <= 1 {
+		return r.deletePDBIfOwned(ctx, instance)
+	}
+
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      instance.Name,
+			Namespace: instance.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
+		if err := controllerutil.SetControllerReference(instance, pdb, r.Scheme); err != nil {
+			return err
+		}
+		maxUnavailable := intstr.FromInt32(1)
+		pdb.Spec.MinAvailable = nil
+		pdb.Spec.MaxUnavailable = &maxUnavailable
+		pdb.Spec.Selector = &metav1.LabelSelector{MatchLabels: podLabels(instance.Name)}
+		return nil
+	})
+	return err
+}
+
+func (r *OdooInstanceReconciler) deletePDBIfOwned(ctx context.Context, instance *odoov1.OdooInstance) error {
+	pdb := &policyv1.PodDisruptionBudget{}
+	key := types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}
+	if err := r.Get(ctx, key, pdb); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(pdb, instance) {
+		return nil
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, pdb))
+}
+
 func (r *OdooInstanceReconciler) reconcileService(ctx context.Context, instance *odoov1.OdooInstance) error {
-	svcName := instance.Name
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      svcName,
+			Name:      instance.Name,
 			Namespace: instance.Namespace,
 		},
 	}
@@ -431,32 +282,19 @@ func (r *OdooInstanceReconciler) reconcileService(ctx context.Context, instance 
 		if err := controllerutil.SetControllerReference(instance, svc, r.Scheme); err != nil {
 			return err
 		}
-
-		svc.Spec = corev1.ServiceSpec{
-			Selector: map[string]string{
-				"app":      "odoo",
-				"instance": instance.Name,
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:     "odoo",
-					Port:     8069,
-					Protocol: "TCP",
-				},
-			},
-			Type: corev1.ServiceTypeClusterIP,
-		}
+		// Mutate only the fields we own so server-allocated fields (ClusterIP, etc.) are left alone.
+		svc.Spec.Type = corev1.ServiceTypeClusterIP
+		svc.Spec.Selector = selectorLabels(instance.Name)
+		svc.Spec.Ports = buildServicePorts()
 		return nil
 	})
 
 	return err
 }
 
-func buildOdooArgs(instance *odoov1.OdooInstance) []string {
-	// PGPASSWORD env var handles auth via libpq — no --db-password arg needed
-	return []string{"--config", "/etc/odoo/odoo.conf"}
-}
-
+// handleFinalizer only releases the finalizer. Deleting an OdooInstance never
+// deletes the data PVC (see dataRetainOnDelete); owned children are cleaned
+// up by Kubernetes garbage collection.
 func (r *OdooInstanceReconciler) handleFinalizer(ctx context.Context, instance *odoov1.OdooInstance) error {
 	if controllerutil.ContainsFinalizer(instance, finalizerOdooInstance) {
 		controllerutil.RemoveFinalizer(instance, finalizerOdooInstance)
@@ -467,6 +305,27 @@ func (r *OdooInstanceReconciler) handleFinalizer(ctx context.Context, instance *
 	return nil
 }
 
+// instancesUsingSecret maps a Secret change to the instances that reference it,
+// so a rotated password rolls the pods without waiting for a resync.
+func (r *OdooInstanceReconciler) instancesUsingSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	list := &odoov1.OdooInstanceList{}
+	if err := r.List(ctx, list, client.InNamespace(obj.GetNamespace())); err != nil {
+		odooLogger.Error(err, "Failed to list OdooInstances for secret", "secret", obj.GetName())
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		inst := &list.Items[i]
+		if inst.Spec.Postgres.PasswordSecret != obj.GetName() && inst.Spec.AdminPasswordSecret != obj.GetName() {
+			continue
+		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: inst.Name, Namespace: inst.Namespace},
+		})
+	}
+	return requests
+}
+
 func (r *OdooInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&odoov1.OdooInstance{}).
@@ -474,6 +333,7 @@ func (r *OdooInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Watches(
 			&odoov1.OdooAddon{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -488,6 +348,10 @@ func (r *OdooInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					},
 				}}
 			}),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.instancesUsingSecret),
 		).
 		Named("odooinstance").
 		Complete(r)

@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.18.0
+    controller-gen.kubebuilder.io/version: v0.23.0
   name: odooaddons.odoo.operator.io
 spec:
   group: odoo.operator.io
@@ -69,6 +69,12 @@ spec:
                 - name
                 type: object
               moduleName:
+                description: |-
+                  ModuleName is the target folder name under the instance's addons volume for a
+                  singleAddon repo. Odoo discovers a module by its containing folder name (not
+                  anything read from the manifest), and Kubernetes object names can't contain the
+                  underscores conventional in Odoo technical names (e.g. "geox_theme") - this lets
+                  the two diverge. Defaults to the OdooAddon's own name if unset.
                 type: string
               readOnly:
                 type: boolean

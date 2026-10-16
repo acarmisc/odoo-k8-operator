@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"time"
 
@@ -41,8 +40,9 @@ import (
 
 // Odoo discovers modules by scanning addons_path directories for immediate
 // subfolders containing __manifest__.py - the config renders a single flat
-// addons_path (see reconcileConfigMap), so every synced module must land
-// directly under addonsMountPath, never nested under a repo/addon-name folder.
+// addons_path (see reconcileConfigMap), so every synced module must appear
+// directly under addonsMountPath. Modules are symlinks into a release store
+// (see buildSyncScript), which keeps that flat layout while switching atomically.
 const (
 	finalizerOdooAddon = "odoo.operator.io/addon-finalizer"
 	addonsMountPath    = "/mnt/odoo/addons"
@@ -51,7 +51,6 @@ const (
 	phasePending = "Pending"
 	phaseSynced  = "Synced"
 
-	syncJobImage   = "alpine/git:2.45.2"
 	resyncInterval = 5 * time.Minute
 	failureBackoff = 30 * time.Second
 	jobWaitTimeout = 3 * time.Minute
@@ -136,12 +135,18 @@ func (r *OdooAddonReconciler) reconcileOdooAddon(ctx context.Context, addon *odo
 		}
 	}
 
+	// A commit-pinned addon that is already synced cannot change, so a resync would only
+	// recreate the Job for nothing.
+	if canSkipResync(addon) {
+		return ctrl.Result{RequeueAfter: resyncInterval}, nil
+	}
+
 	// Deliberately no intermediate "Cloning" status write here: runSyncJob blocks
 	// synchronously for the whole sync, and a status write mid-flight would trigger
 	// the self-reconcile described above before LastSyncTime records this attempt.
 	nodeName := r.odooPodNode(ctx, instance)
 
-	commitHash, syncErr := r.runSyncJob(ctx, addon, pvcName, nodeName)
+	commitHash, syncErr := r.runSyncJob(ctx, addon, pvcName, nodeName, instance.Spec.Addons.AccessMode)
 
 	now := metav1.Now()
 	addon.Status.LastSyncTime = &now
@@ -186,42 +191,6 @@ func (r *OdooAddonReconciler) pending(ctx context.Context, addon *odoov1.OdooAdd
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-var validGitRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
-var validPathSegment = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-
-func validateGitUrl(u string) error {
-	allowed := []string{"https://", "http://", "git@", "ssh://"}
-	for _, prefix := range allowed {
-		if strings.HasPrefix(u, prefix) {
-			return nil
-		}
-	}
-	return fmt.Errorf("gitUrl scheme not allowed: %q", u)
-}
-
-func validateGitRef(ref string) error {
-	if strings.Contains(ref, "..") || strings.HasPrefix(ref, "-") {
-		return fmt.Errorf("invalid gitRef: %q", ref)
-	}
-	if !validGitRef.MatchString(ref) {
-		return fmt.Errorf("gitRef contains disallowed characters: %q", ref)
-	}
-	return nil
-}
-
-// validatePathSegment guards moduleName/addonPath, which get interpolated into the
-// sync Job's shell script - reject anything but a plain relative path/name so a
-// malicious OdooAddon spec can't break out of /addons or inject shell commands.
-func validatePathSegment(name string) error {
-	if name == "" || strings.Contains(name, "..") || strings.HasPrefix(name, "/") {
-		return fmt.Errorf("invalid path segment: %q", name)
-	}
-	if !validPathSegment.MatchString(name) {
-		return fmt.Errorf("path segment contains disallowed characters: %q", name)
-	}
-	return nil
-}
-
 func (r *OdooAddonReconciler) ensureVolumeMounted(ctx context.Context, instance *odoov1.OdooInstance, pvcName string) (bool, error) {
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: instance.Namespace}, pvc); err != nil {
@@ -240,8 +209,8 @@ func (r *OdooAddonReconciler) ensureVolumeMounted(ctx context.Context, instance 
 func (r *OdooAddonReconciler) odooPodNode(ctx context.Context, instance *odoov1.OdooInstance) string {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(instance.Namespace), client.MatchingLabels{
-		"app":      "odoo",
-		"instance": instance.Name,
+		labelApp:      appOdoo,
+		labelInstance: instance.Name,
 	}); err != nil {
 		return ""
 	}
@@ -253,95 +222,25 @@ func (r *OdooAddonReconciler) odooPodNode(ctx context.Context, instance *odoov1.
 	return ""
 }
 
-func (r *OdooAddonReconciler) runSyncJob(ctx context.Context, addon *odoov1.OdooAddon, pvcName, nodeName string) (string, error) {
-	if err := validateGitUrl(addon.Spec.GitUrl); err != nil {
+// runSyncJob validates the spec, replaces any previous sync Job and blocks until the new
+// one finishes, returning the commit it synced.
+func (r *OdooAddonReconciler) runSyncJob(ctx context.Context, addon *odoov1.OdooAddon, pvcName, nodeName string, accessMode corev1.PersistentVolumeAccessMode) (string, error) {
+	spec, err := resolveSyncSpec(addon)
+	if err != nil {
 		return "", err
 	}
 
-	gitRef := addon.Spec.GitRef
-	if gitRef == "" {
-		gitRef = "main"
-	}
-	if err := validateGitRef(gitRef); err != nil {
-		return "", err
-	}
-
-	moduleName := addon.Spec.ModuleName
-	if moduleName == "" {
-		moduleName = addon.Name
-	}
-	if err := validatePathSegment(moduleName); err != nil {
-		return "", fmt.Errorf("invalid moduleName: %w", err)
-	}
-
-	addonPath := addon.Spec.AddonPath
-	if addonPath != "" {
-		if err := validatePathSegment(addonPath); err != nil {
-			return "", fmt.Errorf("invalid addonPath: %w", err)
-		}
-	}
-
-	jobName := fmt.Sprintf("%s-sync", addon.Name)
+	jobName := syncJobName(addon.Name)
 	if err := r.deleteJobIfExists(ctx, addon.Namespace, jobName); err != nil {
 		return "", err
 	}
 
-	script := buildSyncScript(addon.Spec.SingleAddon, addonPath, moduleName)
-
-	backoffLimit := int32(1)
-	ttl := int32(300)
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: addon.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "odoo-k8-operator",
-				"odoo.operator.io/addon":       addon.Name,
-			},
-		},
-		Spec: batchv1.JobSpec{
-			BackoffLimit:            &backoffLimit,
-			TTLSecondsAfterFinished: &ttl,
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"odoo.operator.io/addon": addon.Name},
-				},
-				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					Containers: []corev1.Container{
-						{
-							Name:    "sync",
-							Image:   syncJobImage,
-							Command: []string{"sh", "-c", script},
-							Env: []corev1.EnvVar{
-								{Name: "GIT_URL", Value: addon.Spec.GitUrl},
-								{Name: "GIT_REF", Value: gitRef},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "addons", MountPath: addonsMountPath},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "addons",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: pvcName,
-									ReadOnly:  false,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	if nodeName != "" {
-		job.Spec.Template.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": nodeName}
-	}
-
+	job := buildSyncJob(addon, spec, syncJobOptions{
+		Image:            syncJobImage,
+		PVCName:          pvcName,
+		NodeName:         nodeName,
+		AddonsAccessMode: accessMode,
+	})
 	if err := controllerutil.SetControllerReference(addon, job, r.Scheme); err != nil {
 		return "", err
 	}
@@ -351,37 +250,6 @@ func (r *OdooAddonReconciler) runSyncJob(ctx context.Context, addon *odoov1.Odoo
 	}
 
 	return r.waitForJob(ctx, addon.Namespace, jobName)
-}
-
-// buildSyncScript clones into scratch space (/tmp/repo) first, never directly into the
-// shared addons PVC - a partial clone left mid-sync would have Odoo read a broken module.
-// Only after a full clone succeeds are the resolved module dirs copied into place.
-func buildSyncScript(singleAddon bool, addonPath, moduleName string) string {
-	if singleAddon {
-		return fmt.Sprintf(`set -e
-git clone --depth 1 --branch "$GIT_REF" "$GIT_URL" /tmp/repo
-rm -rf %[1]q
-cp -a /tmp/repo %[1]q
-rm -rf %[1]q/.git
-git -C /tmp/repo rev-parse HEAD
-`, addonsMountPath+"/"+moduleName)
-	}
-
-	srcDir := "/tmp/repo"
-	if addonPath != "" {
-		srcDir = "/tmp/repo/" + addonPath
-	}
-	return fmt.Sprintf(`set -e
-git clone --depth 1 --branch "$GIT_REF" "$GIT_URL" /tmp/repo
-for mod in %[1]q/*/; do
-  mod_name=$(basename "$mod")
-  if [ -f "$mod/__manifest__.py" ]; then
-    rm -rf %[2]q/"$mod_name"
-    cp -a "$mod" %[2]q/"$mod_name"
-  fi
-done
-git -C /tmp/repo rev-parse HEAD
-`, srcDir, addonsMountPath)
 }
 
 func (r *OdooAddonReconciler) deleteJobIfExists(ctx context.Context, namespace, jobName string) error {
@@ -480,7 +348,8 @@ func (r *OdooAddonReconciler) readJobCommitHash(ctx context.Context, namespace, 
 
 func (r *OdooAddonReconciler) handleFinalizer(ctx context.Context, addon *odoov1.OdooAddon) error {
 	if controllerutil.ContainsFinalizer(addon, finalizerOdooAddon) {
-		_ = r.deleteJobIfExists(ctx, addon.Namespace, fmt.Sprintf("%s-sync", addon.Name))
+		// Best-effort: the Job is owned by the addon, so GC removes it anyway if this fails.
+		_ = r.deleteJobIfExists(ctx, addon.Namespace, syncJobName(addon.Name))
 		controllerutil.RemoveFinalizer(addon, finalizerOdooAddon)
 		return r.Update(ctx, addon)
 	}

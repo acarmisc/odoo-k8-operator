@@ -83,7 +83,15 @@ Fonti consultate: [Kubebuilder – good practices](https://book-v3.book.kubebuil
 - **Risorse/Scheduling**: probe su `/web/health`(*), PDB, topology spread, HPA/KEDA su CPU o coda richieste, requests/limits dimensionati su `workers`.
 - **Multi-istanza**: label standard `app.kubernetes.io/*`, quota/LimitRange per namespace, `OdooInstanceClass`/template condiviso per default di fleet, hibernation (`spec.suspend: true` → replicas 0).
 
-## 4. Roadmap proposta
+## 4. Stato implementazione P0
+
+Implementati sul branch `claude/tender-volta-jmoq53` (#1, #2, #3, #5, #6, #7, #10, #12, #13, parte di #16/#17):
+retention PVC dati, hash di config/Secret/commit addon nel pod template, sync atomico con release + symlink,
+credenziali Git via Secret, pinning SHA, probe `/web/health`, PDB, strategia di rollout, porta 8072, `proxy_mode`/`list_db`,
+`adminPasswordSecret`, `accessMode` + validazione CEL per `replicas > 1`, hardening del Job di sync.
+Restano aperti: #4 (init/upgrade DB), #8/#9 (reconcile non bloccante), #11, web/cron separati, backup, conditions/eventi.
+
+## 5. Roadmap proposta
 
 **P0 – prima di andare in produzione**
 1. Retention PVC / niente ownerRef sui dati (#1)

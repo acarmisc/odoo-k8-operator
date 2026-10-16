@@ -1,4 +1,4 @@
-apiVersion: odoo.odoo.io/v1
+apiVersion: odoo.operator.io/v1
 kind: OdooInstance
 metadata:
   labels:
@@ -6,4 +6,23 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: odooinstance-sample
 spec:
-  # TODO(user): Add fields here
+  image: odoo:19.0
+  replicas: 1
+  postgres:
+    host: postgres.default.svc.cluster.local
+    port: 5432
+    database: odoo
+    user: odoo
+    passwordSecret: odoo-db-secret        # key: password
+  adminPasswordSecret: odoo-admin-secret  # key: password (Odoo master password)
+  addonsVolume:
+    size: 10Gi
+  dataVolume:
+    size: 20Gi
+    retainOnDelete: true                  # keep the filestore if the CR is deleted
+  # For replicas > 1 both volumes must be ReadWriteMany:
+  #   addonsVolume.accessMode: ReadWriteMany
+  #   dataVolume.accessMode: ReadWriteMany
+  config:
+    workers: "4"
+    limit_time_real: "120"

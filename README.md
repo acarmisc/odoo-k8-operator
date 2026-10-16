@@ -126,6 +126,24 @@ spec:
 | `instanceRef.namespace` | string | OdooInstance namespace |
 | `readOnly` | bool | Mount as read-only (default: `true`) |
 
+## Production notes
+
+- **Data safety**: the filestore PVC (`<name>-data`) is *not* owned by the `OdooInstance` and survives its deletion
+  (`dataVolume.retainOnDelete: true`, the default). Set it to `false` to garbage-collect it with the instance.
+- **Replicas > 1** requires `ReadWriteMany` for both `addonsVolume.accessMode` and `dataVolume.accessMode`
+  (enforced by CRD validation). With a single replica on RWO storage the Deployment uses the `Recreate` strategy.
+- **Secrets**: `postgres.passwordSecret` and `adminPasswordSecret` (key `password`) are injected as env vars; the
+  Odoo master password is never written to the ConfigMap. Changes to config, referenced Secrets or synced addon
+  commits roll the pods automatically (pod-template hash annotations).
+- **Defaults**: `proxy_mode = True` and `list_db = False` are set unless overridden in `spec.config`.
+  Health probes use `/web/health`; port 8072 (`longpolling`) is exposed on the container and Service;
+  a `PodDisruptionBudget` is created when `replicas > 1`.
+- **Private repositories**: reference a Secret with `OdooAddon.spec.gitSecretRef` (never embed credentials in `gitUrl`).
+  Pin `gitRef` to a commit SHA for reproducible deployments.
+- **Atomic addon updates**: each sync stages modules in `.releases/<addon>/<sha>/` and switches symlinks with an atomic
+  rename; Odoo never sees a half-copied module. The two latest releases are kept for rollback.
+- The sync Job image defaults to `alpine/git:2.47.2`; override it with the `OPERATOR_SYNC_IMAGE` env var on the manager.
+
 ## Development
 
 ### Build

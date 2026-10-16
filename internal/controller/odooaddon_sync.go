@@ -63,10 +63,9 @@ const (
 	gitSecretKnownHosts = "known_hosts"
 	gitSecretTokenKey   = "token"
 	gitSecretUserKey    = "username"
-	// gitSSHSecretMode is what the spec mandates for the SSH key volume. Secret files
-	// are root-owned, so with runAsUser 65532 this may leave the key unreadable; see
-	// the note in the operator report before changing it.
-	gitSSHSecretMode = int32(0o400)
+	// gitSSHSecretMode is group-readable on purpose: Secret files
+	// are root-owned and the sync pod runs as 65532, so it reads the key through fsGroup.
+	gitSSHSecretMode = int32(0o440)
 
 	envGitURL        = "GIT_URL"
 	envGitRef        = "GIT_REF"

@@ -576,8 +576,8 @@ func checkSSHSecretWiring(t *testing.T, pod *corev1.PodSpec) {
 	if vol.Secret.SecretName != testSecretName {
 		t.Errorf("secret name = %q", vol.Secret.SecretName)
 	}
-	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o400 {
-		t.Errorf("defaultMode = %v, want 0400", vol.Secret.DefaultMode)
+	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o440 {
+		t.Errorf("defaultMode = %v, want 0440", vol.Secret.DefaultMode)
 	}
 	mounted := false
 	for _, m := range pod.Containers[0].VolumeMounts {

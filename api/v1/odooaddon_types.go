@@ -21,10 +21,16 @@ import (
 )
 
 type OdooAddonSpec struct {
-	GitUrl      string `json:"gitUrl"`
-	GitRef      string `json:"gitRef,omitempty"`
-	AddonPath   string `json:"addonPath,omitempty"`
-	SingleAddon bool   `json:"singleAddon,omitempty"`
+	GitUrl string `json:"gitUrl"`
+	// GitRef is a branch, tag or full 40-character commit SHA (recommended in
+	// production: it makes deployments reproducible). Defaults to "main".
+	GitRef string `json:"gitRef,omitempty"`
+	// GitSecretRef names a Secret in the same namespace with git credentials.
+	// Supported keys: "token" (+ optional "username") for HTTPS; "ssh-privatekey"
+	// and "known_hosts" for SSH URLs.
+	GitSecretRef *LocalSecretRef `json:"gitSecretRef,omitempty"`
+	AddonPath    string          `json:"addonPath,omitempty"`
+	SingleAddon  bool            `json:"singleAddon,omitempty"`
 	// ModuleName is the target folder name under the instance's addons volume for a
 	// singleAddon repo. Odoo discovers a module by its containing folder name (not
 	// anything read from the manifest), and Kubernetes object names can't contain the
@@ -33,6 +39,11 @@ type OdooAddonSpec struct {
 	ModuleName  string          `json:"moduleName,omitempty"`
 	InstanceRef OdooInstanceRef `json:"instanceRef"`
 	ReadOnly    bool            `json:"readOnly,omitempty"`
+}
+
+// LocalSecretRef references a Secret in the same namespace.
+type LocalSecretRef struct {
+	Name string `json:"name"`
 }
 
 type OdooInstanceRef struct {
@@ -72,5 +83,5 @@ type OdooAddonList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&OdooAddon{}, &OdooAddonList{})
+	register(&OdooAddon{}, &OdooAddonList{})
 }

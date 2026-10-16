@@ -38,7 +38,7 @@ var _ = Describe("OdooAddon Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: testNamespace,
 		}
 		odooaddon := &odoov1.OdooAddon{}
 
@@ -49,7 +49,7 @@ var _ = Describe("OdooAddon Controller", func() {
 				resource := &odoov1.OdooAddon{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
-						Namespace: "default",
+						Namespace: testNamespace,
 					},
 					// TODO(user): Specify other spec details if needed.
 				}

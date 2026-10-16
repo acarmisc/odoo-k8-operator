@@ -52,11 +52,25 @@ spec:
             properties:
               addonsVolume:
                 properties:
+                  accessMode:
+                    description: |-
+                      AccessMode of the PVC. Defaults to ReadWriteOnce; use ReadWriteMany when
+                      running more than one replica.
+                    enum:
+                    - ReadWriteOnce
+                    - ReadWriteMany
+                    type: string
                   size:
                     type: string
                   storageClass:
                     type: string
                 type: object
+              adminPasswordSecret:
+                description: |-
+                  AdminPasswordSecret names a Secret (key "password") holding Odoo's master
+                  (database manager) password. It is injected as an environment variable and
+                  passed to Odoo via --admin-passwd, never written to the ConfigMap.
+                type: string
               config:
                 additionalProperties:
                   type: string
@@ -68,6 +82,19 @@ spec:
                   such as product images live on the pod's ephemeral filesystem and are
                   lost on every restart.
                 properties:
+                  accessMode:
+                    description: |-
+                      AccessMode of the PVC. Defaults to ReadWriteOnce; use ReadWriteMany when
+                      running more than one replica.
+                    enum:
+                    - ReadWriteOnce
+                    - ReadWriteMany
+                    type: string
+                  retainOnDelete:
+                    description: |-
+                      RetainOnDelete keeps the data PVC (filestore) when the OdooInstance is
+                      deleted. Defaults to true; set to false to garbage-collect it with the instance.
+                    type: boolean
                   size:
                     type: string
                   storageClass:
@@ -160,6 +187,16 @@ spec:
               version:
                 type: string
             type: object
+            x-kubernetes-validations:
+            - message: replicas > 1 requires dataVolume.accessMode=ReadWriteMany (the
+                filestore must be shared by all pods)
+              rule: '!has(self.replicas) || self.replicas <= 1 || (has(self.dataVolume)
+                && has(self.dataVolume.accessMode) && self.dataVolume.accessMode ==
+                ''ReadWriteMany'')'
+            - message: replicas > 1 requires addonsVolume.accessMode=ReadWriteMany
+              rule: '!has(self.replicas) || self.replicas <= 1 || (has(self.addonsVolume)
+                && has(self.addonsVolume.accessMode) && self.addonsVolume.accessMode
+                == ''ReadWriteMany'')'
           status:
             properties:
               addonPaths:

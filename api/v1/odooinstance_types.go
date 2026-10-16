@@ -21,6 +21,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// +kubebuilder:validation:XValidation:rule="!has(self.replicas) || self.replicas <= 1 || (has(self.dataVolume) && has(self.dataVolume.accessMode) && self.dataVolume.accessMode == 'ReadWriteMany')",message="replicas > 1 requires dataVolume.accessMode=ReadWriteMany (the filestore must be shared by all pods)"
+// +kubebuilder:validation:XValidation:rule="!has(self.replicas) || self.replicas <= 1 || (has(self.addonsVolume) && has(self.addonsVolume.accessMode) && self.addonsVolume.accessMode == 'ReadWriteMany')",message="replicas > 1 requires addonsVolume.accessMode=ReadWriteMany"
 type OdooInstanceSpec struct {
 	Image string `json:"image,omitempty"`
 	// +kubebuilder:validation:Minimum=1
@@ -33,11 +35,19 @@ type OdooInstanceSpec struct {
 	Postgres  PostgresSpec                `json:"postgres,omitempty"`
 	Config    map[string]string           `json:"config,omitempty"`
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+	// AdminPasswordSecret names a Secret (key "password") holding Odoo's master
+	// (database manager) password. It is injected as an environment variable and
+	// passed to Odoo via --admin-passwd, never written to the ConfigMap.
+	AdminPasswordSecret string `json:"adminPasswordSecret,omitempty"`
 }
 
 type AddonVolumeSpec struct {
 	StorageClass *string `json:"storageClass,omitempty"`
 	Size         string  `json:"size,omitempty"`
+	// AccessMode of the PVC. Defaults to ReadWriteOnce; use ReadWriteMany when
+	// running more than one replica.
+	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany
+	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
 }
 
 // DataVolumeSpec configures persistent storage for Odoo's data_dir
@@ -47,6 +57,13 @@ type AddonVolumeSpec struct {
 type DataVolumeSpec struct {
 	StorageClass *string `json:"storageClass,omitempty"`
 	Size         string  `json:"size,omitempty"`
+	// AccessMode of the PVC. Defaults to ReadWriteOnce; use ReadWriteMany when
+	// running more than one replica.
+	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany
+	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
+	// RetainOnDelete keeps the data PVC (filestore) when the OdooInstance is
+	// deleted. Defaults to true; set to false to garbage-collect it with the instance.
+	RetainOnDelete *bool `json:"retainOnDelete,omitempty"`
 }
 
 type PostgresSpec struct {
@@ -90,5 +107,5 @@ type OdooInstanceList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&OdooInstance{}, &OdooInstanceList{})
+	register(&OdooInstance{}, &OdooInstanceList{})
 }

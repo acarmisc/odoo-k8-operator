@@ -56,7 +56,21 @@ spec:
               addonPath:
                 type: string
               gitRef:
+                description: |-
+                  GitRef is a branch, tag or full 40-character commit SHA (recommended in
+                  production: it makes deployments reproducible). Defaults to "main".
                 type: string
+              gitSecretRef:
+                description: |-
+                  GitSecretRef names a Secret in the same namespace with git credentials.
+                  Supported keys: "token" (+ optional "username") for HTTPS; "ssh-privatekey"
+                  and "known_hosts" for SSH URLs.
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
               gitUrl:
                 type: string
               instanceRef:

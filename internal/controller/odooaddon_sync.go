@@ -77,8 +77,6 @@ const (
 	volumeScratch = "scratch"
 	scratchMount  = "/tmp"
 
-	labelManagedBy     = "app.kubernetes.io/managed-by"
-	labelManagedByVal  = "odoo-k8-operator"
 	labelAddonOwner    = "odoo.operator.io/addon"
 	schemeHTTPS        = "https://"
 	schemeHTTP         = "http://"
@@ -424,7 +422,7 @@ func buildSyncJob(addon *odoov1.OdooAddon, spec syncSpec, opts syncJobOptions) *
 			Name:      syncJobName(addon.Name),
 			Namespace: addon.Namespace,
 			Labels: map[string]string{
-				labelManagedBy:  labelManagedByVal,
+				labelManagedBy:  managedByOperator,
 				labelAddonOwner: addon.Name,
 			},
 		},

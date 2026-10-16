@@ -29,25 +29,25 @@ import (
 )
 
 const (
-	testAddonName    = "geox-theme"
-	testAddonNS      = "odoo"
-	testModule       = "geox_theme"
-	testInstanceName = "prod"
-	testSecretName   = "git-creds"
-	testBranchRef    = "main"
-	testSHARef       = "0123456789abcdef0123456789abcdef01234567"
-	testHTTPSURL     = "https://github.com/acme/odoo-addons.git"
-	testSSHURL       = "git@github.com:acme/odoo-addons.git"
-	testSSHSchemeURL = "ssh://git@github.com/acme/odoo-addons.git"
-	testAddonPath    = "addons"
-	testPVCName      = "prod-addons"
-	testNodeName     = "node-a"
-	testSyncImage    = "alpine/git:test"
-	testSecretPass   = "hunter2-do-not-log"
-	testRootlessUID  = int64(65532)
-	testRelRootLine  = "RELROOT=/mnt/odoo/addons/.releases/geox-theme"
-	testRevParseLast = "git -C /tmp/repo rev-parse HEAD\n"
-	testHTTPSAuthHdr = `http.extraHeader=Authorization: Basic $AUTH`
+	testAddonName        = "geox-theme"
+	testAddonNS          = "odoo"
+	testModule           = "geox_theme"
+	testSyncInstanceName = "prod"
+	testSecretName       = "git-creds"
+	testBranchRef        = "main"
+	testSHARef           = "0123456789abcdef0123456789abcdef01234567"
+	testHTTPSURL         = "https://github.com/acme/odoo-addons.git"
+	testSSHURL           = "git@github.com:acme/odoo-addons.git"
+	testSSHSchemeURL     = "ssh://git@github.com/acme/odoo-addons.git"
+	testAddonPath        = "addons"
+	testPVCName          = "prod-addons"
+	testNodeName         = "node-a"
+	testSyncImage        = "alpine/git:test"
+	testSecretPass       = "hunter2-do-not-log"
+	testRootlessUID      = int64(65532)
+	testRelRootLine      = "RELROOT=/mnt/odoo/addons/.releases/geox-theme"
+	testRevParseLast     = "git -C /tmp/repo rev-parse HEAD\n"
+	testHTTPSAuthHdr     = `http.extraHeader=Authorization: Basic $AUTH`
 )
 
 // syncScriptCase is one generated-script scenario: the spec plus fragments that must
@@ -344,7 +344,7 @@ func TestResolveSyncSpec(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: testAddonName, Namespace: testAddonNS},
 				Spec: odoov1.OdooAddonSpec{
 					GitUrl:      testHTTPSURL,
-					InstanceRef: odoov1.OdooInstanceRef{Name: testInstanceName},
+					InstanceRef: odoov1.OdooInstanceRef{Name: testSyncInstanceName},
 				},
 			}
 			if tc.mutate != nil {

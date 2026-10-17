@@ -161,11 +161,12 @@ All workflows are in `.github/workflows/`. Each one has `workflow_dispatch`, so 
 | `lint.yml` | push to `main`, tags `v*`, all PRs | golangci-lint `v2.15.0`. |
 | `test.yml` | push to `main`, tags `v*`, all PRs | `unit and envtest`: `make test`, `go mod tidy` check, `make verify-generated`, coverage upload (`cover.out`, 14 days). `govulncheck`: `govulncheck ./...` in a separate job. |
 | `test-e2e.yml` | push to `main`, tags `v*`, PRs to `main` | kind `v0.29.0` with node `kindest/node:v1.34.0`, then `make test-e2e`. Uploads kind logs on failure. |
-| `build.yml` | push to `main`, tags `v*`, PRs to `main` | Builds the multi-arch image (amd64 and arm64). On non-PR events only: scans the amd64 image with Trivy (fails on HIGH and CRITICAL fixable vulnerabilities), pushes to GHCR with SBOM and provenance, and signs the digest with cosign (keyless). |
+| `release.yml` | manual only | Creates the tag and the GitHub Release, then starts `build.yml` on the tag with `publish=true`. |
+| `build.yml` | push to `main`, tags `v*`, PRs to `main`, manual | Builds the multi-arch image (amd64 and arm64). On non-PR events only: scans the amd64 image with Trivy (fails on HIGH and CRITICAL fixable vulnerabilities), pushes to GHCR with SBOM and provenance, and signs the digest with cosign (keyless). |
 
 Concurrency: runs on the same branch cancel each other, except on tags, which always finish.
 
-Pull requests never log in to the registry, never push, never sign.
+Pull requests never log in to the registry, never push, never sign. A manual run of `build.yml` is a dry run (build and scan only) unless it runs on a `v*` tag with `publish=true`.
 
 ## Image tags and signature verification
 
@@ -190,18 +191,15 @@ For production, deploy by digest once you have verified it.
 
 ## Cutting a release
 
-1. Make sure `main` is green, and that the generated files are up to date (`make verify-generated`).
-2. Tag and push:
+1. Update `CHANGELOG.md`: add a `## [X.Y.Z] - date` section. The release notes are taken from it.
+2. Make sure the branch you release from is green (lint, tests, e2e, and a dry run of `build.yml`), and that the generated files are up to date (`make verify-generated`).
+3. Run the **Release** workflow (`release.yml`, Actions tab or `gh workflow run release.yml --ref <branch> -f version=X.Y.Z`). It validates the version and the changelog section, creates the annotated tag `vX.Y.Z` on the commit you ran it from, creates the GitHub Release with the changelog notes (a pre-release if the version has a `-suffix`), and starts `build.yml` on the tag with `publish=true`.
+4. `build.yml` builds the multi-arch image, scans it with Trivy, pushes it and signs the digest with cosign.
+5. Verify the signature (see above), then deploy with `make deploy IMG=ghcr.io/acarmisc/odoo-k8-operator:vX.Y.Z`.
 
-   ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
+You can also tag by hand (`git tag vX.Y.Z && git push origin vX.Y.Z`): the push event starts `build.yml` the same way, but no GitHub Release is created.
 
-3. The `build.yml` workflow publishes and signs the image. Tags are never cancelled by newer runs.
-4. Verify the signature (see above), then deploy with `make deploy IMG=ghcr.io/acarmisc/odoo-k8-operator:v0.1.0`.
-
-Pre-release tags such as `v0.2.0-rc1` are published without `latest`, so a default `make deploy` never picks them up.
+Pre-release versions such as `0.2.0-rc.1` are published without `latest`, so a default `make deploy` never picks them up.
 
 ## Adding a field to the API
 

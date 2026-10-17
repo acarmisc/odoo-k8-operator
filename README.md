@@ -186,4 +186,4 @@ Commit the generated files with the change that caused them.
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See <https://www.apache.org/licenses/LICENSE-2.0>.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

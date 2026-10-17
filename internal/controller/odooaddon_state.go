@@ -183,6 +183,8 @@ func observeSyncJob(job *batchv1.Job, addon *odoov1.OdooAddon) addonJobObservati
 		ControlledByAddon: metav1.IsControlledBy(job, addon),
 		SpecHash:          job.Annotations[annotationSyncSpecHash],
 		Succeeded:         job.Status.Succeeded > 0 || upgradeHasCondition(job, batchv1.JobComplete),
-		Failed:            job.Status.Failed > 0 || upgradeHasCondition(job, batchv1.JobFailed),
+		// Only the Failed condition is terminal: status.failed counts pods, and the Job
+		// may still be retrying within its backoffLimit.
+		Failed: upgradeHasCondition(job, batchv1.JobFailed),
 	}
 }

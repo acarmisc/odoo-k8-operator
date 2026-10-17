@@ -256,9 +256,9 @@ func TestObserveSyncJob(t *testing.T) {
 			want: addonJobObservation{Exists: true, ControlledByAddon: true, SpecHash: stateCurrentHash, Succeeded: true},
 		},
 		{
-			name: "failed by count",
+			name: "failed pod but Job still retrying is not terminal",
 			job:  newJob(true, stateCurrentHash, func(j *batchv1.Job) { j.Status.Failed = 1 }),
-			want: addonJobObservation{Exists: true, ControlledByAddon: true, SpecHash: stateCurrentHash, Failed: true},
+			want: addonJobObservation{Exists: true, ControlledByAddon: true, SpecHash: stateCurrentHash},
 		},
 		{
 			name: "failed by Failed condition (deadline)",

@@ -89,7 +89,7 @@ Implementati sul branch `claude/tender-volta-jmoq53` (#1, #2, #3, #5, #6, #7, #1
 retention PVC dati, hash di config/Secret/commit addon nel pod template, sync atomico con release + symlink,
 credenziali Git via Secret, pinning SHA, probe `/web/health`, PDB, strategia di rollout, porta 8072, `proxy_mode`/`list_db`,
 `adminPasswordSecret`, `accessMode` + validazione CEL per `replicas > 1`, hardening del Job di sync.
-Upgrade moduli (P1, parte di #4): CRD `OdooUpgrade` + gate sul rollout (`spec.upgrade`). Restano aperti: init DB, #8/#9 (reconcile non bloccante), #11, web/cron separati, backup, conditions/eventi.
+Upgrade moduli (P1, parte di #4): CRD `OdooUpgrade` + gate sul rollout (`spec.upgrade`). Sync addon non bloccante (#8: macchina a stati su Job, `--addon-max-concurrent-reconciles`). Restano aperti: init DB, #9 (reconcile non bloccante), #11, web/cron separati, backup, conditions/eventi.
 
 ## 5. Roadmap proposta
 

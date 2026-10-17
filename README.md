@@ -149,6 +149,9 @@ spec:
   run one at a time. You can also create an `OdooUpgrade` by hand (spec is immutable; `modules` and/or `installModules`).
   Note: addon files on the shared volume already point at the new revision while the upgrade runs, and image/config
   changes are not gated.
+- **Addon sync is non-blocking**: each OdooAddon is reconciled as a state machine over its sync Job, so many addons sync
+  in parallel (`--addon-max-concurrent-reconciles`, default 4). A failed sync keeps the status `Failed` with the log
+  tail in `status.message`; editing the addon spec mid-sync discards the stale Job and starts a new one.
 - The sync Job image defaults to `alpine/git:2.47.2`; override it with the `OPERATOR_SYNC_IMAGE` env var on the manager.
 
 ## Development

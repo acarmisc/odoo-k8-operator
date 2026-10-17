@@ -109,6 +109,13 @@ spec:
                 description: Message explains the current phase, e.g. why the last
                   sync failed.
                 type: string
+              modules:
+                description: |-
+                  Modules lists the Odoo module folders the last successful sync published under the
+                  addons mount, sorted. Empty when the sync did not report them.
+                items:
+                  type: string
+                type: array
               phase:
                 type: string
               ready:

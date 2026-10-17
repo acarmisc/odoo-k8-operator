@@ -58,6 +58,11 @@ const (
 	resyncInterval = 5 * time.Minute
 	failureBackoff = 30 * time.Second
 	pendingRequeue = 10 * time.Second
+	// addonCleanupRequeue paces the deletion steps while a cleanup Job runs.
+	addonCleanupRequeue = 5 * time.Second
+	// cleanupTimeout bounds how long deletion waits for the cleanup Job before it gives up
+	// and removes the finalizer anyway.
+	cleanupTimeout = 3 * time.Minute
 
 	// batchControllerUIDLabel is set by the Job controller on every pod of a Job. Selecting
 	// pods by the Job's UID keeps logs from a previous Job with the same name out of reach.
@@ -94,7 +99,7 @@ func (r *OdooAddonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if addon.DeletionTimestamp != nil {
-		return ctrl.Result{}, r.handleFinalizer(ctx, addon)
+		return r.handleFinalizer(ctx, addon)
 	}
 
 	if !controllerutil.ContainsFinalizer(addon, finalizerOdooAddon) {
@@ -170,14 +175,14 @@ func (r *OdooAddonReconciler) syncAddon(ctx context.Context, addon *odoov1.OdooA
 	switch decision.Action {
 	case addonActionInvalidSpec, addonActionJobConflict:
 		if decision.DeleteJob {
-			if err := r.deleteSyncJob(ctx, job); err != nil {
+			if err := r.deleteJob(ctx, job); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
 		return r.markFailed(ctx, addon, decision.Message)
 
 	case addonActionDeleteStaleJob:
-		if err := r.deleteSyncJob(ctx, job); err != nil {
+		if err := r.deleteJob(ctx, job); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: decision.Requeue}, nil
@@ -209,7 +214,7 @@ func (r *OdooAddonReconciler) syncAddon(ctx context.Context, addon *odoov1.OdooA
 // recordSyncSuccess stores the commit the Job synced and retires the Job. If the commit
 // cannot be read, the addon is marked Failed instead, so the Job is retired either way.
 func (r *OdooAddonReconciler) recordSyncSuccess(ctx context.Context, addon *odoov1.OdooAddon, job *batchv1.Job) (ctrl.Result, error) {
-	commit, err := r.readJobCommitHash(ctx, job)
+	commit, modules, err := r.readSyncOutput(ctx, job)
 	if err != nil {
 		return r.finishFailedSyncJob(ctx, addon, job, err.Error())
 	}
@@ -219,12 +224,13 @@ func (r *OdooAddonReconciler) recordSyncSuccess(ctx context.Context, addon *odoo
 		s.Phase = phaseSynced
 		s.Ready = true
 		s.ClonedCommit = commit
+		s.Modules = modules
 		s.Message = ""
 		s.LastSyncTime = &now
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.deleteSyncJob(ctx, job); err != nil {
+	if err := r.deleteJob(ctx, job); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: resyncInterval}, nil
@@ -249,7 +255,7 @@ func (r *OdooAddonReconciler) finishFailedSyncJob(ctx context.Context, addon *od
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.deleteSyncJob(ctx, job); err != nil {
+	if err := r.deleteJob(ctx, job); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: failureBackoff}, nil
@@ -370,10 +376,10 @@ func (r *OdooAddonReconciler) getSyncJob(ctx context.Context, addon *odoov1.Odoo
 	return job, nil
 }
 
-// deleteSyncJob starts a background delete of job and returns without waiting. The UID
+// deleteJob starts a background delete of job and returns without waiting. The UID
 // precondition stops it from deleting a newer Job that reused the name. A Job that is
 // already gone or was replaced is not an error.
-func (r *OdooAddonReconciler) deleteSyncJob(ctx context.Context, job *batchv1.Job) error {
+func (r *OdooAddonReconciler) deleteJob(ctx context.Context, job *batchv1.Job) error {
 	propagation := metav1.DeletePropagationBackground
 	uid := job.UID
 	err := r.Delete(ctx, job, &client.DeleteOptions{
@@ -445,29 +451,154 @@ func (r *OdooAddonReconciler) jobLogTail(ctx context.Context, job *batchv1.Job) 
 	return upgradeTail(logs, addonLogTailBytes)
 }
 
-// readJobCommitHash returns the commit SHA a sync Job printed: the last line of its logs.
-func (r *OdooAddonReconciler) readJobCommitHash(ctx context.Context, job *batchv1.Job) (string, error) {
+// readSyncOutput returns the commit SHA and the module list a sync Job printed. A missing
+// or malformed modules line yields no modules; only a missing commit is an error.
+func (r *OdooAddonReconciler) readSyncOutput(ctx context.Context, job *batchv1.Job) (string, []string, error) {
 	logs, err := r.readJobLogs(ctx, job)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	lines := strings.Split(strings.TrimSpace(logs), "\n")
-	if len(lines) == 0 || lines[len(lines)-1] == "" {
-		return "", fmt.Errorf("sync job %s produced no commit hash output", job.Name)
+	commit, modules := parseSyncOutput(logs)
+	if commit == "" {
+		return "", nil, fmt.Errorf("sync job %s produced no commit hash output", job.Name)
 	}
-	return strings.TrimSpace(lines[len(lines)-1]), nil
+	return commit, modules, nil
 }
 
-func (r *OdooAddonReconciler) handleFinalizer(ctx context.Context, addon *odoov1.OdooAddon) error {
-	if controllerutil.ContainsFinalizer(addon, finalizerOdooAddon) {
-		// Best-effort and not awaited: the Job is owned by the addon, so the garbage
-		// collector removes it anyway if this delete fails. Only a Job this addon owns is
-		// touched; a foreign Job with the same name is left alone.
-		if job, err := r.getSyncJob(ctx, addon); err == nil && job != nil && metav1.IsControlledBy(job, addon) {
-			_ = r.deleteSyncJob(ctx, job)
+// handleFinalizer runs the deletion steps for an addon, one non-blocking pass at a time:
+//  1. stop the sync Job, so nothing writes to the volume while it is cleaned;
+//  2. run the cleanup Job, which removes this addon's links and release store;
+//  3. drop the finalizer.
+//
+// Step 2 is skipped when the instance or its addons PVC is gone, and step 3 runs
+// anyway when the cleanup Job fails or runs past cleanupTimeout, so deletion never sticks.
+func (r *OdooAddonReconciler) handleFinalizer(ctx context.Context, addon *odoov1.OdooAddon) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(addon, finalizerOdooAddon) {
+		return ctrl.Result{}, nil
+	}
+
+	syncJob, err := r.getSyncJob(ctx, addon)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	// Only a Job this addon owns is touched; a foreign Job with the same name is left alone.
+	ownedSyncJob := syncJob != nil && metav1.IsControlledBy(syncJob, addon)
+
+	instance, pvcName, present, err := r.addonVolume(ctx, addon)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !present {
+		return r.finishDeletion(ctx, addon, syncJob, ownedSyncJob, nil)
+	}
+
+	if ownedSyncJob {
+		// The sync Job may still be writing to the volume, so it goes first. Deletion is
+		// background; the cleanup Job is created on a later pass once the sync Job is gone.
+		if err := r.deleteJob(ctx, syncJob); err != nil {
+			return ctrl.Result{}, err
 		}
-		controllerutil.RemoveFinalizer(addon, finalizerOdooAddon)
-		return r.Update(ctx, addon)
+		return ctrl.Result{RequeueAfter: addonStaleJobRequeue}, nil
+	}
+
+	cleanup, err := r.getCleanupJob(ctx, addon)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if cleanup == nil {
+		if err := r.createCleanupJob(ctx, addon, instance, pvcName); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: addonCleanupRequeue}, nil
+	}
+	if !metav1.IsControlledBy(cleanup, addon) {
+		addonLogger.Info("cleanup Job name is taken by another object; skipping volume cleanup", "addon", addon.Name)
+		return r.finishDeletion(ctx, addon, nil, false, nil)
+	}
+
+	observed := observeSyncJob(cleanup, addon)
+	switch {
+	case observed.Succeeded:
+		return r.finishDeletion(ctx, addon, nil, false, cleanup)
+	case observed.Failed:
+		addonLogger.Info("cleanup Job failed; removing the finalizer anyway", "addon", addon.Name)
+		return r.finishDeletion(ctx, addon, nil, false, cleanup)
+	case time.Since(cleanup.CreationTimestamp.Time) > cleanupTimeout:
+		addonLogger.Info("cleanup Job overran; removing the finalizer anyway", "addon", addon.Name)
+		return r.finishDeletion(ctx, addon, nil, false, cleanup)
+	}
+	return ctrl.Result{RequeueAfter: addonCleanupRequeue}, nil
+}
+
+// finishDeletion retires the Jobs still around (both are background deletes), then removes
+// the finalizer so the addon object goes away.
+func (r *OdooAddonReconciler) finishDeletion(ctx context.Context, addon *odoov1.OdooAddon, syncJob *batchv1.Job, ownedSyncJob bool, cleanup *batchv1.Job) (ctrl.Result, error) {
+	if ownedSyncJob {
+		if err := r.deleteJob(ctx, syncJob); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if cleanup != nil {
+		if err := r.deleteJob(ctx, cleanup); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	controllerutil.RemoveFinalizer(addon, finalizerOdooAddon)
+	return ctrl.Result{}, r.Update(ctx, addon)
+}
+
+// addonVolume returns the instance and the addons PVC name the addon's volume lives on.
+// present is false when either no longer exists, which means there is nothing to clean up.
+func (r *OdooAddonReconciler) addonVolume(ctx context.Context, addon *odoov1.OdooAddon) (*odoov1.OdooInstance, string, bool, error) {
+	ref := addon.Spec.InstanceRef
+	if ref.Name == "" || (ref.Namespace != "" && ref.Namespace != addon.Namespace) {
+		return nil, "", false, nil
+	}
+	instance := &odoov1.OdooInstance{}
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: addon.Namespace}, instance); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, err
+	}
+	pvcName := addonsPVCName(instance.Name)
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: addon.Namespace}, pvc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, err
+	}
+	return instance, pvcName, true, nil
+}
+
+// getCleanupJob returns the addon's cleanup Job, or nil when it does not exist.
+func (r *OdooAddonReconciler) getCleanupJob(ctx context.Context, addon *odoov1.OdooAddon) (*batchv1.Job, error) {
+	job := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Name: cleanupJobName(addon.Name), Namespace: addon.Namespace}, job)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+// createCleanupJob creates the addon's cleanup Job on the node-pinned addons volume. An
+// existing Job of the same name is not an error: the next pass judges it.
+func (r *OdooAddonReconciler) createCleanupJob(ctx context.Context, addon *odoov1.OdooAddon, instance *odoov1.OdooInstance, pvcName string) error {
+	job := buildCleanupJob(addon, syncJobOptions{
+		Image:            syncJobImage,
+		PVCName:          pvcName,
+		NodeName:         r.odooPodNode(ctx, instance),
+		AddonsAccessMode: instance.Spec.Addons.AccessMode,
+	})
+	if err := controllerutil.SetControllerReference(addon, job, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create cleanup job: %w", err)
 	}
 	return nil
 }

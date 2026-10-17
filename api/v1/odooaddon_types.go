@@ -56,6 +56,9 @@ type OdooAddonStatus struct {
 	Phase        string       `json:"phase,omitempty"`
 	ClonedCommit string       `json:"clonedCommit,omitempty"`
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
+	// Modules lists the Odoo module folders the last successful sync published under the
+	// addons mount, sorted. Empty when the sync did not report them.
+	Modules []string `json:"modules,omitempty"`
 	// Message explains the current phase, e.g. why the last sync failed.
 	Message string `json:"message,omitempty"`
 }

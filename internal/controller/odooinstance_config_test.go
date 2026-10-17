@@ -254,18 +254,25 @@ func TestFilterReadyAddons(t *testing.T) {
 		readyAddon("theme", testInstanceName, "aaa", true),
 		readyAddon("pending", testInstanceName, "", false),
 		readyAddon("elsewhere", "other-instance", "bbb", true),
-		readyAddon("sales", testInstanceName, "ccc", true),
+		readyAddon(testAddonSales, testInstanceName, "ccc", true),
 	}
 	got := filterReadyAddons(all, testInstanceName)
-	if len(got) != 2 || got[0].Name != "theme" || got[1].Name != "sales" {
+	if len(got) != 2 || got[0].Name != "theme" || got[1].Name != testAddonSales {
 		t.Fatalf("filterReadyAddons() = %v, want theme and sales", got)
 	}
 }
 
+// Names shared by the addon path and hash tests.
+const (
+	testAddonSales = "sales"
+	testModA       = "a_mod"
+	testModB       = "b_mod"
+)
+
 func TestAddonRevisionsAndHash(t *testing.T) {
 	forward := []odoov1.OdooAddon{
 		readyAddon("theme", testInstanceName, "aaa", true),
-		readyAddon("sales", testInstanceName, "ccc", true),
+		readyAddon(testAddonSales, testInstanceName, "ccc", true),
 	}
 	reversed := []odoov1.OdooAddon{forward[1], forward[0]}
 
@@ -278,7 +285,7 @@ func TestAddonRevisionsAndHash(t *testing.T) {
 
 	bumped := []odoov1.OdooAddon{
 		readyAddon("theme", testInstanceName, "aaa2", true),
-		readyAddon("sales", testInstanceName, "ccc", true),
+		readyAddon(testAddonSales, testInstanceName, "ccc", true),
 	}
 	if addonsHash(forward) == addonsHash(bumped) {
 		t.Errorf("addonsHash should change when an addon is re-synced to a new commit")
@@ -290,13 +297,67 @@ func TestAddonRevisionsAndHash(t *testing.T) {
 
 func TestAddonMountPaths(t *testing.T) {
 	singleModule := readyAddon("geox-theme", testInstanceName, "aaa", true)
-	singleModule.Spec.ModuleName = "geox_theme"
-	addons := []odoov1.OdooAddon{singleModule, readyAddon("sales", testInstanceName, "ccc", true)}
+	singleModule.Spec.ModuleName = testModule
+	addons := []odoov1.OdooAddon{singleModule, readyAddon(testAddonSales, testInstanceName, "ccc", true)}
 
 	got := addonMountPaths(addons)
-	want := []string{"/mnt/odoo/addons/geox_theme", "/mnt/odoo/addons/sales"}
+	want := []string{"/mnt/odoo/addons/geox_theme", "/mnt/odoo/addons/" + testAddonSales}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("addonMountPaths() = %v, want %v", got, want)
+	}
+}
+
+func TestAddonMountPathsUsesReportedModules(t *testing.T) {
+	// A multi-module repo: the OdooAddon name and moduleName say nothing about the
+	// module folders, so the paths must come from what the sync reported.
+	multi := readyAddon("theme-pack", testInstanceName, "aaa", true)
+	multi.Spec.ModuleName = "ignored_name"
+	multi.Status.Modules = []string{"website_theme", "sale_theme"}
+	legacy := readyAddon(testAddonSales, testInstanceName, "ccc", true)
+
+	got := addonMountPaths([]odoov1.OdooAddon{multi, legacy})
+	want := []string{"/mnt/odoo/addons/sale_theme", "/mnt/odoo/addons/" + testAddonSales, "/mnt/odoo/addons/website_theme"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("addonMountPaths() = %v, want %v", got, want)
+	}
+}
+
+func TestAddonMountPathsFallsBackWithoutModules(t *testing.T) {
+	noModuleName := readyAddon(testAddonSales, testInstanceName, "ccc", true)
+	withModuleName := readyAddon("geox-theme", testInstanceName, "aaa", true)
+	withModuleName.Spec.ModuleName = testModule
+
+	got := addonMountPaths([]odoov1.OdooAddon{noModuleName, withModuleName})
+	want := []string{"/mnt/odoo/addons/geox_theme", "/mnt/odoo/addons/" + testAddonSales}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("addonMountPaths() = %v, want %v", got, want)
+	}
+	if got := addonMountPaths(nil); len(got) != 0 {
+		t.Errorf("addonMountPaths(nil) = %v, want none", got)
+	}
+}
+
+func TestAddonsHashTracksReportedModules(t *testing.T) {
+	plain := readyAddon("theme", testInstanceName, "aaa", true)
+	if got, want := addonRevisions([]odoov1.OdooAddon{plain}), []string{"theme=aaa"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("addonRevisions() without modules = %v, want %v", got, want)
+	}
+
+	withModules := plain
+	withModules.Status.Modules = []string{testModB, testModA}
+	reordered := plain
+	reordered.Status.Modules = []string{testModA, testModB}
+	changed := plain
+	changed.Status.Modules = []string{testModA}
+
+	if addonsHash([]odoov1.OdooAddon{withModules}) != addonsHash([]odoov1.OdooAddon{reordered}) {
+		t.Errorf("addonsHash must not depend on the order modules were reported in")
+	}
+	if addonsHash([]odoov1.OdooAddon{withModules}) == addonsHash([]odoov1.OdooAddon{plain}) {
+		t.Errorf("addonsHash must change when modules appear")
+	}
+	if addonsHash([]odoov1.OdooAddon{withModules}) == addonsHash([]odoov1.OdooAddon{changed}) {
+		t.Errorf("addonsHash must change when the module set changes")
 	}
 }
 

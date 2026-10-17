@@ -19,6 +19,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -32,8 +36,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	restclient "k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	odoov1 "github.com/odoo-k8s/odoo-k8-operator/api/v1"
 )
@@ -72,6 +79,48 @@ func oaEnvLogsFor(job *batchv1.Job) *corev1.Pod {
 			Containers:    []corev1.Container{{Name: syncContainerName, Image: testSyncImage}},
 		},
 	}
+}
+
+// oaLogsClientset is a fake clientset whose pod logs are the given text. The stock fake
+// always answers "fake logs", which cannot exercise the modules line of a sync Job.
+type oaLogsClientset struct {
+	kubernetes.Interface
+	logs string
+}
+
+func (c oaLogsClientset) CoreV1() corev1client.CoreV1Interface {
+	return oaLogsCoreV1{CoreV1Interface: c.Interface.CoreV1(), logs: c.logs}
+}
+
+type oaLogsCoreV1 struct {
+	corev1client.CoreV1Interface
+	logs string
+}
+
+func (c oaLogsCoreV1) Pods(namespace string) corev1client.PodInterface {
+	return oaLogsPods{PodInterface: c.CoreV1Interface.Pods(namespace), logs: c.logs}
+}
+
+type oaLogsPods struct {
+	corev1client.PodInterface
+	logs string
+}
+
+// GetLogs returns a request whose body is the configured logs, whatever the pod is.
+func (p oaLogsPods) GetLogs(string, *corev1.PodLogOptions) *restclient.Request {
+	hc := &http.Client{Transport: oaLogsTransport(p.logs)}
+	return restclient.NewRequestWithClient(&url.URL{Scheme: "http", Host: "logs.invalid"}, "", restclient.ClientContentConfig{}, hc)
+}
+
+type oaLogsTransport string
+
+func (body oaLogsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(string(body))),
+		Request:    req,
+	}, nil
 }
 
 var _ = Describe("OdooAddon Controller", func() {
@@ -149,9 +198,7 @@ var _ = Describe("OdooAddon Controller", func() {
 		}
 
 		getJob := func(addonName string) (*batchv1.Job, error) {
-			job := &batchv1.Job{}
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: syncJobName(addonName), Namespace: testNamespace}, job)
-			return job, err
+			return getNamedJob(syncJobName(addonName))
 		}
 
 		// createInstance makes an OdooInstance; bound also creates its addons PVC as Bound,
@@ -197,25 +244,7 @@ var _ = Describe("OdooAddon Controller", func() {
 
 		// setJobStatus writes Job status the way the Job controller would for a finished Job.
 		setJobStatus := func(name string, succeeded bool) {
-			job, err := getJob(name)
-			Expect(err).NotTo(HaveOccurred())
-			now := metav1.Now()
-			job.Status.StartTime = &now
-			if succeeded {
-				job.Status.Succeeded = 1
-				job.Status.CompletionTime = &now
-				job.Status.Conditions = []batchv1.JobCondition{
-					{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: "CompletionsReached"},
-					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: now},
-				}
-			} else {
-				job.Status.Failed = 1
-				job.Status.Conditions = []batchv1.JobCondition{
-					{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: oaEnvBackoffRsn, Message: oaEnvBackoffMsg},
-					{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: oaEnvBackoffRsn, Message: oaEnvBackoffMsg},
-				}
-			}
-			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+			setNamedJobStatus(syncJobName(name), succeeded)
 		}
 
 		// cleanup removes everything the specs created. envtest has no garbage collector,
@@ -226,6 +255,7 @@ var _ = Describe("OdooAddon Controller", func() {
 				_ = k8sClient.Delete(ctx, &odoov1.OdooAddon{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}})
 				oaFinalize(ctx, name)
 				_ = k8sClient.Delete(ctx, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: syncJobName(name), Namespace: testNamespace}}, background)
+				_ = k8sClient.Delete(ctx, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: cleanupJobName(name), Namespace: testNamespace}}, background)
 				_ = k8sClient.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(testNamespace), client.MatchingLabels{oaEnvJobNameLabel: syncJobName(name)})
 			}
 			for _, name := range instances {
@@ -270,8 +300,56 @@ var _ = Describe("OdooAddon Controller", func() {
 				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "no Job may exist before the volume is bound")
 			})
 
-			It("removes its Job when the addon is deleted", func() {
+			It("retires the sync Job, runs a cleanup Job, then removes the finalizer", func() {
 				createInstance(oaEnvInstA, true)
+				createAddon(oaEnvAddonA, oaEnvInstA, nil)
+				r := newReconciler(nil)
+				reconcile(r, oaEnvAddonA)
+
+				Expect(k8sClient.Delete(ctx, getAddon(oaEnvAddonA))).To(Succeed())
+				res := reconcile(r, oaEnvAddonA)
+				Expect(res.RequeueAfter).To(Equal(addonStaleJobRequeue))
+				_, err := getJob(oaEnvAddonA)
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the sync Job is stopped first")
+
+				res = reconcile(r, oaEnvAddonA)
+				Expect(res.RequeueAfter).To(Equal(addonCleanupRequeue))
+				cleanupJob, err := getNamedJob(cleanupJobName(oaEnvAddonA))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(cleanupJob.OwnerReferences).To(HaveLen(1))
+				Expect(*cleanupJob.OwnerReferences[0].Controller).To(BeTrue())
+
+				res = reconcile(r, oaEnvAddonA)
+				Expect(res.RequeueAfter).To(Equal(addonCleanupRequeue), "still running: keep waiting")
+				Expect(getAddon(oaEnvAddonA).Finalizers).To(ContainElement(finalizerOdooAddon))
+
+				setNamedJobStatus(cleanupJobName(oaEnvAddonA), true)
+				reconcile(r, oaEnvAddonA)
+
+				err = k8sClient.Get(ctx, types.NamespacedName{Name: oaEnvAddonA, Namespace: testNamespace}, &odoov1.OdooAddon{})
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the addon is gone once its finalizer is removed")
+				_, err = getNamedJob(cleanupJobName(oaEnvAddonA))
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "a finished cleanup Job is retired")
+			})
+
+			It("removes the finalizer anyway when the cleanup Job fails", func() {
+				createInstance(oaEnvInstA, true)
+				createAddon(oaEnvAddonA, oaEnvInstA, nil)
+				r := newReconciler(nil)
+				reconcile(r, oaEnvAddonA)
+				Expect(k8sClient.Delete(ctx, getAddon(oaEnvAddonA))).To(Succeed())
+				reconcile(r, oaEnvAddonA)
+				reconcile(r, oaEnvAddonA)
+
+				setNamedJobStatus(cleanupJobName(oaEnvAddonA), false)
+				reconcile(r, oaEnvAddonA)
+
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: oaEnvAddonA, Namespace: testNamespace}, &odoov1.OdooAddon{})
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "deletion must never stick on a failed cleanup")
+			})
+
+			It("skips the cleanup Job when the addons PVC is gone", func() {
+				createInstance(oaEnvInstA, false)
 				createAddon(oaEnvAddonA, oaEnvInstA, nil)
 				r := newReconciler(nil)
 				reconcile(r, oaEnvAddonA)
@@ -279,10 +357,30 @@ var _ = Describe("OdooAddon Controller", func() {
 				Expect(k8sClient.Delete(ctx, getAddon(oaEnvAddonA))).To(Succeed())
 				reconcile(r, oaEnvAddonA)
 
-				_, err := getJob(oaEnvAddonA)
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: oaEnvAddonA, Namespace: testNamespace}, &odoov1.OdooAddon{})
 				Expect(apierrors.IsNotFound(err)).To(BeTrue())
-				err = k8sClient.Get(ctx, types.NamespacedName{Name: oaEnvAddonA, Namespace: testNamespace}, &odoov1.OdooAddon{})
+				_, err = getNamedJob(cleanupJobName(oaEnvAddonA))
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "no cleanup Job without a volume")
+			})
+		})
+
+		Context("when the addon is deleted before its instance exists", func() {
+			AfterEach(func() {
+				cleanup([]string{oaEnvAddonA}, nil)
+			})
+
+			It("removes the finalizer immediately", func() {
+				createAddon(oaEnvAddonA, oaEnvInstA, nil)
+				r := newReconciler(nil)
+				reconcile(r, oaEnvAddonA)
+
+				Expect(k8sClient.Delete(ctx, getAddon(oaEnvAddonA))).To(Succeed())
+				reconcile(r, oaEnvAddonA)
+
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: oaEnvAddonA, Namespace: testNamespace}, &odoov1.OdooAddon{})
 				Expect(apierrors.IsNotFound(err)).To(BeTrue())
+				_, err = getNamedJob(cleanupJobName(oaEnvAddonA))
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "no cleanup Job without an instance")
 			})
 		})
 
@@ -315,6 +413,43 @@ var _ = Describe("OdooAddon Controller", func() {
 
 				_, err = getJob(oaEnvAddonA)
 				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "a finished Job is retired")
+			})
+
+			It("records the modules the sync published next to the commit", func() {
+				createInstance(oaEnvInstA, true)
+				createAddon(oaEnvAddonA, oaEnvInstA, nil)
+				logs := "modules: website_theme,sale_theme\n" + testSHARef + "\n"
+				r := newReconciler(oaLogsClientset{Interface: fake.NewClientset(), logs: logs})
+				reconcile(r, oaEnvAddonA)
+				job, err := getJob(oaEnvAddonA)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Create(ctx, oaEnvLogsFor(job))).To(Succeed())
+				setJobStatus(oaEnvAddonA, true)
+
+				reconcile(r, oaEnvAddonA)
+
+				addon := getAddon(oaEnvAddonA)
+				Expect(addon.Status.Phase).To(Equal(phaseSynced))
+				Expect(addon.Status.ClonedCommit).To(Equal(testSHARef))
+				Expect(addon.Status.Modules).To(Equal([]string{"sale_theme", "website_theme"}))
+			})
+
+			It("still succeeds, with no modules, when the sync prints no modules line", func() {
+				createInstance(oaEnvInstA, true)
+				createAddon(oaEnvAddonA, oaEnvInstA, nil)
+				r := newReconciler(oaLogsClientset{Interface: fake.NewClientset(), logs: testSHARef + "\n"})
+				reconcile(r, oaEnvAddonA)
+				job, err := getJob(oaEnvAddonA)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Create(ctx, oaEnvLogsFor(job))).To(Succeed())
+				setJobStatus(oaEnvAddonA, true)
+
+				reconcile(r, oaEnvAddonA)
+
+				addon := getAddon(oaEnvAddonA)
+				Expect(addon.Status.Phase).To(Equal(phaseSynced))
+				Expect(addon.Status.ClonedCommit).To(Equal(testSHARef))
+				Expect(addon.Status.Modules).To(BeEmpty())
 			})
 
 			It("keeps a previously synced addon Ready and Synced while a resync Job runs", func() {
@@ -510,9 +645,46 @@ func oaDeletePVC(ctx context.Context, name string) {
 	_ = k8sClient.Update(ctx, pvc)
 }
 
-// oaFinalize runs the deletion path for an addon that was deleted but still carries its
-// finalizer, so the object is actually removed. Missing addons are ignored.
+// oaFinalize drops the finalizer of an addon that was deleted, so the object is actually
+// removed without running the volume cleanup. Missing addons are ignored.
 func oaFinalize(ctx context.Context, name string) {
-	r := &OdooAddonReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace}})
+	addon := &odoov1.OdooAddon{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNamespace}, addon); err != nil {
+		return
+	}
+	if !controllerutil.ContainsFinalizer(addon, finalizerOdooAddon) {
+		return
+	}
+	controllerutil.RemoveFinalizer(addon, finalizerOdooAddon)
+	_ = k8sClient.Update(ctx, addon)
+}
+
+// getNamedJob fetches a Job in the test namespace by name.
+func getNamedJob(name string) (*batchv1.Job, error) {
+	job := &batchv1.Job{}
+	err := k8sClient.Get(context.Background(), types.NamespacedName{Name: name, Namespace: testNamespace}, job)
+	return job, err
+}
+
+// setNamedJobStatus writes Job status the way the Job controller would for a finished Job.
+func setNamedJobStatus(name string, succeeded bool) {
+	job, err := getNamedJob(name)
+	Expect(err).NotTo(HaveOccurred())
+	now := metav1.Now()
+	job.Status.StartTime = &now
+	if succeeded {
+		job.Status.Succeeded = 1
+		job.Status.CompletionTime = &now
+		job.Status.Conditions = []batchv1.JobCondition{
+			{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: "CompletionsReached"},
+			{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: now},
+		}
+	} else {
+		job.Status.Failed = 1
+		job.Status.Conditions = []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: oaEnvBackoffRsn, Message: oaEnvBackoffMsg},
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: oaEnvBackoffRsn, Message: oaEnvBackoffMsg},
+		}
+	}
+	Expect(k8sClient.Status().Update(context.Background(), job)).To(Succeed())
 }

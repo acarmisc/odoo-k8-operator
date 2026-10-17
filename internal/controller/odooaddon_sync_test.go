@@ -87,6 +87,7 @@ func syncScriptCases() []syncScriptCase {
 				testHTTPSAuthHdr,
 				`GIT_USERNAME="${GIT_USERNAME:-x-access-token}"`,
 				`AUTH=$(printf '%s:%s' "$GIT_USERNAME" "$GIT_TOKEN" | base64 | tr -d '\n')`,
+				`printf '%s\n' geox_theme > "$MODLIST"`,
 				"publish geox_theme /tmp/repo\n",
 				`cp -a "$src" "$REL/.$name.partial"`,
 				`if [ ! -d "$REL/$name" ]; then`,
@@ -119,8 +120,9 @@ func syncScriptCases() []syncScriptCase {
 				`git clone --depth 1 --branch "$GIT_REF" "$GIT_URL" /tmp/repo`,
 				"for mod in /tmp/repo/addons/*/; do",
 				`if [ -f "$mod/__manifest__.py" ]; then`,
-				`publish "$(basename "$mod")" "$mod"`,
-				`[ "$found" = 1 ] || { echo "no Odoo modules found in /tmp/repo/addons" >&2; exit 1; }`,
+				`basename "$mod" >> "$MODLIST"`,
+				`[ -s "$MODLIST" ] || { echo "no Odoo modules found in /tmp/repo/addons" >&2; exit 1; }`,
+				`publish "$name" "/tmp/repo/addons/$name"`,
 			},
 			notContains: []string{testHTTPSAuthHdr, "Basic ", envGitToken, "GIT_SSH", "git init"},
 		},
@@ -394,14 +396,16 @@ func TestIsCommitSHA(t *testing.T) {
 
 func TestCanSkipResync(t *testing.T) {
 	tests := []struct {
-		name   string
-		ref    string
-		phase  string
-		cloned string
-		want   bool
+		name    string
+		ref     string
+		phase   string
+		cloned  string
+		modules []string
+		want    bool
 	}{
-		{name: "pinned and already synced", ref: testSHARef, phase: phaseSynced, cloned: testSHARef, want: true},
-		{name: "pinned but failed", ref: testSHARef, phase: phaseFailed, cloned: testSHARef, want: false},
+		{name: "pinned and already synced", ref: testSHARef, phase: phaseSynced, cloned: testSHARef, modules: []string{testModule}, want: true},
+		{name: "pinned and synced, but modules never reported", ref: testSHARef, phase: phaseSynced, cloned: testSHARef, want: false},
+		{name: "pinned but failed", ref: testSHARef, phase: phaseFailed, cloned: testSHARef, modules: []string{testModule}, want: false},
 		{name: "pinned but a different commit was synced", ref: testSHARef, phase: phaseSynced, cloned: "ffffffffffffffffffffffffffffffffffffffff", want: false},
 		{name: "pinned but never synced", ref: testSHARef, phase: phasePending, want: false},
 		{name: "branch keeps resyncing", ref: testBranchRef, phase: phaseSynced, cloned: testSHARef, want: false},
@@ -412,6 +416,7 @@ func TestCanSkipResync(t *testing.T) {
 			addon := &odoov1.OdooAddon{Spec: odoov1.OdooAddonSpec{GitRef: tc.ref}}
 			addon.Status.Phase = tc.phase
 			addon.Status.ClonedCommit = tc.cloned
+			addon.Status.Modules = tc.modules
 			if got := canSkipResync(addon); got != tc.want {
 				t.Errorf("canSkipResync = %v, want %v", got, tc.want)
 			}

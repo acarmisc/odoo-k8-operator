@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -47,6 +48,7 @@ const (
 	defaultGitUser = "x-access-token"
 
 	syncJobSuffix     = "-sync"
+	cleanupJobSuffix  = "-cleanup"
 	syncContainerName = "sync"
 	syncBackoffLimit  = int32(1)
 	syncTTLSeconds    = int32(300)
@@ -59,6 +61,13 @@ const (
 	syncRepoDir     = "/tmp/repo"
 	syncReleasesDir = ".releases"
 	syncManifest    = "__manifest__.py"
+	// syncModulesFile is the per-addon manifest, in the release store, listing the modules
+	// the last sync published. It is what the next sync diffs against to find stale links.
+	syncModulesFile = ".modules"
+	// Scratch files live on the emptyDir at /tmp: the root filesystem is read-only, and the
+	// release store is on the PVC, where a temp file would not rename atomically.
+	syncModulesScratch = scratchMount + "/modules.list"
+	syncPrevScratch    = scratchMount + "/modules.prev"
 
 	gitSecretMountPath  = "/etc/git-secret"
 	gitSecretVolume     = "git-secret"
@@ -153,7 +162,9 @@ func isCommitSHA(ref string) bool {
 }
 
 // canSkipResync reports whether a periodic resync can be skipped: the addon is pinned
-// to a commit SHA that is already synced, so nothing can have changed upstream.
+// to a commit SHA that is already synced, so nothing can have changed upstream. An addon
+// whose sync never reported its modules (synced before the operator tracked them) is not
+// skipped, so one resync records the module list and the stale-link bookkeeping.
 func canSkipResync(addon *odoov1.OdooAddon) bool {
 	ref := addon.Spec.GitRef
 	if ref == "" {
@@ -161,7 +172,8 @@ func canSkipResync(addon *odoov1.OdooAddon) bool {
 	}
 	return isCommitSHA(ref) &&
 		addon.Status.Phase == phaseSynced &&
-		addon.Status.ClonedCommit == ref
+		addon.Status.ClonedCommit == ref &&
+		len(addon.Status.Modules) > 0
 }
 
 // validateGitUrl checks the scheme and rejects credentials embedded in the URL.
@@ -344,23 +356,64 @@ func buildSyncScript(s syncSpec) string {
 }
 `
 
-	var publishCalls string
+	// Discovery writes the module names to MODLIST before anything on the volume is touched,
+	// so the conflict check below can cover every module before the first link switches.
+	src := syncRepoDir
+	if !s.SingleAddon && s.AddonPath != "" {
+		src = syncRepoDir + "/" + s.AddonPath
+	}
+	var discover, publishCalls string
 	if s.SingleAddon {
+		discover = "printf '%s\\n' " + shQuote(s.ModuleName) + " > \"$MODLIST\"\n"
 		publishCalls = "publish " + shQuote(s.ModuleName) + " " + syncRepoDir + "\n"
 	} else {
-		src := syncRepoDir
-		if s.AddonPath != "" {
-			src = syncRepoDir + "/" + s.AddonPath
-		}
-		publishCalls = "found=0\n" +
-			"for mod in " + src + "/*/; do\n" +
+		discover = "for mod in " + src + "/*/; do\n" +
 			"  if [ -f \"$mod/" + syncManifest + "\" ]; then\n" +
-			"    publish \"$(basename \"$mod\")\" \"$mod\"\n" +
-			"    found=1\n" +
+			"    basename \"$mod\" >> \"$MODLIST\"\n" +
 			"  fi\n" +
 			"done\n" +
-			"[ \"$found\" = 1 ] || { echo \"no Odoo modules found in " + src + "\" >&2; exit 1; }\n"
+			"[ -s \"$MODLIST\" ] || { echo \"no Odoo modules found in " + src + "\" >&2; exit 1; }\n"
+		publishCalls = "while IFS= read -r name; do\n" +
+			"  publish \"$name\" \"" + src + "/$name\"\n" +
+			"done < \"$MODLIST\"\n"
 	}
+
+	// conflictCheck refuses to publish a module that another addon's release already
+	// provides. It runs for every module before any copy or link switch.
+	const conflictCheck = `while IFS= read -r name; do
+  target="$ADDONS/$name"
+  if [ -L "$target" ]; then
+    dest=$(readlink "$target")
+    case "$dest" in
+      "$ADDONS/.releases/"*)
+        case "$dest" in
+          "$RELROOT/"*) ;;
+          *)
+            other=${dest#"$ADDONS/.releases/"}
+            other=${other%%/*}
+            echo "module $name is already provided by addon $other" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    esac
+  fi
+done < "$MODLIST"
+`
+
+	// staleRemoval drops links for modules the previous sync published but this one did
+	// not, as long as the link still points into this addon's releases.
+	const staleRemoval = `while IFS= read -r old; do
+  [ -n "$old" ] || continue
+  if grep -qxF "$old" "$MODLIST"; then continue; fi
+  target="$ADDONS/$old"
+  if [ -L "$target" ]; then
+    case "$(readlink "$target")" in
+      "$RELROOT/"*) rm -f "$target" ;;
+    esac
+  fi
+done < "$PREV"
+`
 
 	return "set -e\n" +
 		"set +x\n" +
@@ -371,12 +424,41 @@ func buildSyncScript(s syncSpec) string {
 		"ADDONS=" + addonsMountPath + "\n" +
 		"RELROOT=" + shQuote(addonsMountPath+"/"+syncReleasesDir+"/"+s.AddonName) + "\n" +
 		"REL=\"$RELROOT/$SHA\"\n" +
+		"MODLIST=" + syncModulesScratch + "\n" +
+		"PREV=" + syncPrevScratch + "\n" +
+		": > \"$MODLIST\"\n" +
+		discover +
+		"sort -u \"$MODLIST\" -o \"$MODLIST\"\n" +
+		conflictCheck +
+		"if [ -f \"$RELROOT/" + syncModulesFile + "\" ]; then cp \"$RELROOT/" + syncModulesFile + "\" \"$PREV\"; else : > \"$PREV\"; fi\n" +
 		"mkdir -p \"$REL\"\n" +
 		publishFn +
 		publishCalls +
 		"touch \"$REL\"\n" +
+		staleRemoval +
+		"cp \"$MODLIST\" \"$RELROOT/" + syncModulesFile + ".tmp\"\n" +
+		"mv \"$RELROOT/" + syncModulesFile + ".tmp\" \"$RELROOT/" + syncModulesFile + "\"\n" +
 		"ls -1t \"$RELROOT\" | tail -n +3 | while IFS= read -r old; do rm -rf \"$RELROOT/$old\"; done\n" +
+		"printf 'modules: %s\\n' \"$(paste -sd, \"$MODLIST\")\"\n" +
 		"git -C " + syncRepoDir + " rev-parse HEAD\n"
+}
+
+// buildCleanupScript returns the sh script the cleanup Job runs when an OdooAddon is deleted.
+// It removes every symlink in the addons mount that points into this addon's release store,
+// then the release store itself. Modules of other addons are never touched.
+func buildCleanupScript(addonName string) string {
+	return "set -e\n" +
+		"set +x\n" +
+		"ADDONS=" + addonsMountPath + "\n" +
+		"RELROOT=" + shQuote(addonsMountPath+"/"+syncReleasesDir+"/"+addonName) + "\n" +
+		"if [ -d \"$ADDONS\" ]; then\n" +
+		"  find \"$ADDONS\" -mindepth 1 -maxdepth 1 -type l | while IFS= read -r link; do\n" +
+		"    case \"$(readlink \"$link\")\" in\n" +
+		"      \"$RELROOT/\"*) rm -f \"$link\" ;;\n" +
+		"    esac\n" +
+		"  done\n" +
+		"fi\n" +
+		"rm -rf \"$RELROOT\"\n"
 }
 
 // syncJobOptions carries the cluster facts buildSyncJob needs but cannot derive itself.
@@ -394,15 +476,58 @@ func syncJobName(addonName string) string {
 	return addonName + syncJobSuffix
 }
 
+// cleanupJobName returns the name of the Job that cleans up an addon's volume entries.
+func cleanupJobName(addonName string) string {
+	return addonName + cleanupJobSuffix
+}
+
+// jobWiring is what one addon Job needs beyond the addons volume and scratch space.
+type jobWiring struct {
+	env     []corev1.EnvVar
+	volumes []corev1.Volume
+	mounts  []corev1.VolumeMount
+}
+
 // buildSyncJob returns the hardened sync Job for spec. It does not set an owner
 // reference; the caller does that with the scheme.
 func buildSyncJob(addon *odoov1.OdooAddon, spec syncSpec, opts syncJobOptions) *batchv1.Job {
-	env := []corev1.EnvVar{
+	wiring := jobWiring{env: []corev1.EnvVar{
 		{Name: envGitURL, Value: spec.GitURL},
 		{Name: envGitRef, Value: spec.GitRef},
-		{Name: envHome, Value: scratchMount},
+	}}
+	switch spec.Auth {
+	case authHTTPSToken:
+		wiring.env = append(wiring.env,
+			corev1.EnvVar{Name: envGitToken, ValueFrom: secretEnvSource(spec.SecretName, gitSecretTokenKey, false)},
+			corev1.EnvVar{Name: envGitUsername, ValueFrom: secretEnvSource(spec.SecretName, gitSecretUserKey, true)},
+		)
+	case authSSH:
+		mode := gitSSHSecretMode
+		wiring.volumes = append(wiring.volumes, corev1.Volume{
+			Name: gitSecretVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: spec.SecretName, DefaultMode: &mode},
+			},
+		})
+		wiring.mounts = append(wiring.mounts, corev1.VolumeMount{Name: gitSecretVolume, MountPath: gitSecretMountPath, ReadOnly: true})
+		wiring.env = append(wiring.env, corev1.EnvVar{Name: envGitSSHCommand, Value: sshCommand()})
 	}
-	volumes := []corev1.Volume{
+	return buildAddonJob(addon, syncJobName(addon.Name),
+		map[string]string{annotationSyncSpecHash: syncSpecHash(spec)}, buildSyncScript(spec), wiring, opts)
+}
+
+// buildCleanupJob returns the hardened cleanup Job that removes addon's links and release
+// store from the addons volume. Like the sync Job it has no owner reference set here.
+func buildCleanupJob(addon *odoov1.OdooAddon, opts syncJobOptions) *batchv1.Job {
+	return buildAddonJob(addon, cleanupJobName(addon.Name), nil, buildCleanupScript(addon.Name), jobWiring{}, opts)
+}
+
+// buildAddonJob returns a Job that runs script against the addons volume with the shared
+// hardening: non-root, read-only root filesystem, no service account token, resource limits,
+// a Job deadline, and a node pin when the addons PVC is ReadWriteOnce.
+func buildAddonJob(addon *odoov1.OdooAddon, jobName string, annotations map[string]string, script string, wiring jobWiring, opts syncJobOptions) *batchv1.Job {
+	env := append([]corev1.EnvVar{{Name: envHome, Value: scratchMount}}, wiring.env...)
+	volumes := append([]corev1.Volume{
 		{
 			Name: volumeAddons,
 			VolumeSource: corev1.VolumeSource{
@@ -413,41 +538,23 @@ func buildSyncJob(addon *odoov1.OdooAddon, spec syncSpec, opts syncJobOptions) *
 			Name:         volumeScratch,
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
-	}
-	mounts := []corev1.VolumeMount{
+	}, wiring.volumes...)
+	mounts := append([]corev1.VolumeMount{
 		{Name: volumeAddons, MountPath: addonsMountPath},
 		{Name: volumeScratch, MountPath: scratchMount},
-	}
-
-	switch spec.Auth {
-	case authHTTPSToken:
-		env = append(env,
-			corev1.EnvVar{Name: envGitToken, ValueFrom: secretEnvSource(spec.SecretName, gitSecretTokenKey, false)},
-			corev1.EnvVar{Name: envGitUsername, ValueFrom: secretEnvSource(spec.SecretName, gitSecretUserKey, true)},
-		)
-	case authSSH:
-		mode := gitSSHSecretMode
-		volumes = append(volumes, corev1.Volume{
-			Name: gitSecretVolume,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{SecretName: spec.SecretName, DefaultMode: &mode},
-			},
-		})
-		mounts = append(mounts, corev1.VolumeMount{Name: gitSecretVolume, MountPath: gitSecretMountPath, ReadOnly: true})
-		env = append(env, corev1.EnvVar{Name: envGitSSHCommand, Value: sshCommand()})
-	}
+	}, wiring.mounts...)
 
 	podLabels := map[string]string{labelAddonOwner: addon.Name}
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      syncJobName(addon.Name),
+			Name:      jobName,
 			Namespace: addon.Namespace,
 			Labels: map[string]string{
 				labelManagedBy:  managedByOperator,
 				labelAddonOwner: addon.Name,
 			},
-			Annotations: map[string]string{annotationSyncSpecHash: syncSpecHash(spec)},
+			Annotations: annotations,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            ptrTo(syncBackoffLimit),
@@ -471,7 +578,7 @@ func buildSyncJob(addon *odoov1.OdooAddon, spec syncSpec, opts syncJobOptions) *
 						{
 							Name:         syncContainerName,
 							Image:        opts.Image,
-							Command:      []string{"sh", "-c", buildSyncScript(spec)},
+							Command:      []string{"sh", "-c", script},
 							Env:          env,
 							VolumeMounts: mounts,
 							SecurityContext: &corev1.SecurityContext{
@@ -527,4 +634,46 @@ func secretEnvSource(name, key string, optional bool) *corev1.EnvVarSource {
 // ptrTo returns a pointer to a copy of v.
 func ptrTo[T any](v T) *T {
 	return &v
+}
+
+// modulesLinePrefix starts the line the sync script prints just before the commit SHA.
+const modulesLinePrefix = "modules: "
+
+// parseSyncOutput reads a sync Job's logs. The commit SHA is the last non-empty line. The
+// module list is the line right before it, when that line is a well-formed modules line.
+// commit is "" when the logs have no output at all; modules is nil when the line is
+// missing or malformed, so a sync is never failed over its module report.
+func parseSyncOutput(logs string) (commit string, modules []string) {
+	var lines []string
+	for _, line := range strings.Split(logs, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			lines = append(lines, t)
+		}
+	}
+	if len(lines) == 0 {
+		return "", nil
+	}
+	if len(lines) >= 2 {
+		modules = parseModulesLine(lines[len(lines)-2])
+	}
+	return lines[len(lines)-1], modules
+}
+
+// parseModulesLine parses "modules: a,b,c". It returns nil for anything else, and for any
+// list holding a name that is not a valid module folder name.
+func parseModulesLine(line string) []string {
+	rest, ok := strings.CutPrefix(line, modulesLinePrefix)
+	if !ok {
+		return nil
+	}
+	parts := strings.Split(rest, ",")
+	modules := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if validateModuleName(p) != nil {
+			return nil
+		}
+		modules = append(modules, p)
+	}
+	slices.Sort(modules)
+	return slices.Compact(modules)
 }

@@ -35,27 +35,46 @@ func filterReadyAddons(all []odoov1.OdooAddon, instanceName string) []odoov1.Odo
 	return ready
 }
 
-// addonMountPaths returns the paths the addons are mounted at inside the pod.
+// addonMountPaths returns the sorted paths the modules are mounted at inside the pod.
 // Every synced module lands directly under addonsMountPath (see
-// odooaddon_controller.go); a singleAddon module folder is moduleName, which
-// defaults to the addon's own name.
+// odooaddon_controller.go). An addon that reported its modules contributes one path per
+// module. An addon that has not (synced before modules were tracked) falls back to its
+// singleAddon folder, moduleName, which defaults to the addon's own name.
 func addonMountPaths(addons []odoov1.OdooAddon) []string {
 	paths := make([]string, 0, len(addons))
 	for i := range addons {
-		moduleName := addons[i].Spec.ModuleName
-		if moduleName == "" {
-			moduleName = addons[i].Name
+		for _, module := range addonModules(&addons[i]) {
+			paths = append(paths, filepath.Join(addonsMountPath, module))
 		}
-		paths = append(paths, filepath.Join(addonsMountPath, moduleName))
 	}
-	return paths
+	slices.Sort(paths)
+	return slices.Compact(paths)
 }
 
-// addonRevisions returns sorted "addonName=ClonedCommit" entries.
+// addonModules returns the module folder names an addon provides on the addons volume.
+func addonModules(addon *odoov1.OdooAddon) []string {
+	if len(addon.Status.Modules) > 0 {
+		return addon.Status.Modules
+	}
+	if addon.Spec.ModuleName != "" {
+		return []string{addon.Spec.ModuleName}
+	}
+	return []string{addon.Name}
+}
+
+// addonRevisions returns sorted "addonName=ClonedCommit" entries. An addon that reported
+// modules gets them appended, so a change in its module set changes the hash too. Addons
+// without reported modules keep the plain entry.
 func addonRevisions(addons []odoov1.OdooAddon) []string {
 	revisions := make([]string, 0, len(addons))
 	for i := range addons {
-		revisions = append(revisions, addons[i].Name+"="+addons[i].Status.ClonedCommit)
+		rev := addons[i].Name + "=" + addons[i].Status.ClonedCommit
+		if len(addons[i].Status.Modules) > 0 {
+			modules := slices.Clone(addons[i].Status.Modules)
+			slices.Sort(modules)
+			rev += " modules=" + strings.Join(modules, ",")
+		}
+		revisions = append(revisions, rev)
 	}
 	slices.Sort(revisions)
 	return revisions

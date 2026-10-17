@@ -4,10 +4,11 @@ on:
   # Manual runs build and scan but never log in, push or sign (a dry run of the release pipeline).
   workflow_dispatch:
     inputs:
-      publish:
-        description: "Publish and sign the image (only honoured when run on a v* tag, used by the Release workflow)"
-        type: boolean
-        default: false
+      release_version:
+        description: "Release: version without the leading v (for example 0.1.0 or 0.2.0-rc.1). Publishes and signs the image, then creates the tag and the GitHub Release from CHANGELOG.md. Leave empty for a dry run (build and scan only)."
+        required: false
+        type: string
+        default: ""
   push:
     branches: [ "main" ]
     tags: [ 'v*' ]
@@ -34,7 +35,7 @@ jobs:
     # packages: write to push to GHCR; id-token: write for keyless cosign signing.
     # Both are only exercised on non-PR events (see the `if:` guards below).
     permissions:
-      contents: read
+      contents: write   # only used to create the tag and the release when release_version is set
       packages: write
       id-token: write
 
@@ -44,15 +45,25 @@ jobs:
         with:
           persist-credentials: false
 
-      # Publishing happens on push events and on manual runs against a v* tag with publish=true.
-      - name: Decide whether to publish
+      # Publishing happens on push events and on manual runs with release_version set.
+      - name: Decide whether to publish and validate the release version
         id: mode
         env:
           EVENT: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-          PUBLISH_INPUT: ${{ inputs.publish }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
-          if [ "$EVENT" = "push" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$PUBLISH_INPUT" = "true" ] && [[ "$REF" == refs/tags/v* ]]; }; then
+          if [ -n "$RELEASE_VERSION" ]; then
+            if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              echo "::error::release_version must look like 1.2.3 or 1.2.3-rc.1, got: $RELEASE_VERSION"; exit 1
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/v$RELEASE_VERSION" >/dev/null 2>&1; then
+              echo "::error::tag v$RELEASE_VERSION already exists"; exit 1
+            fi
+            if ! grep -q "^## \[$RELEASE_VERSION\]" CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no '## [$RELEASE_VERSION]' section"; exit 1
+            fi
+          fi
+          if [ "$EVENT" = "push" ] || [ -n "$RELEASE_VERSION" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
@@ -86,9 +97,11 @@ jobs:
           tags: |
             type=sha
             type=ref,event=branch,enable={{is_default_branch}}
-            type=semver,pattern=v{{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+            type=semver,pattern=v{{version}},enable=${{ inputs.release_version == '' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ inputs.release_version == '' }}
+            type=semver,pattern=v{{version}},value=v${{ inputs.release_version }},enable=${{ inputs.release_version != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ inputs.release_version }},enable=${{ inputs.release_version != '' && !contains(inputs.release_version, '-') }}
+            type=raw,value=latest,enable=${{ (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')) || (inputs.release_version != '' && !contains(inputs.release_version, '-')) }}
 
       # Build the amd64 image locally first so Trivy can gate the publish.
       - name: Build amd64 image for scanning
@@ -144,3 +157,26 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.push.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # Only after the image was built, scanned, pushed and signed: tag the commit and publish the
+      # GitHub Release with the CHANGELOG notes.
+      - name: Create the tag and the GitHub Release
+        if: inputs.release_version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          awk -v v="$RELEASE_VERSION" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git tag -a "v$RELEASE_VERSION" -m "v$RELEASE_VERSION" "$GITHUB_SHA"
+          git push origin "v$RELEASE_VERSION"
+          flags=""
+          if [[ "$RELEASE_VERSION" == *-* ]]; then flags="--prerelease"; fi
+          gh release create "v$RELEASE_VERSION" --title "v$RELEASE_VERSION" --notes-file release-notes.md --verify-tag $flags

@@ -77,7 +77,7 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	err = r.reconcileOdooInstance(ctx, instance)
+	result, err := r.reconcileOdooInstance(ctx, instance)
 	if err != nil {
 		odooLogger.Error(err, "Failed to reconcile OdooInstance")
 		instance.Status.Phase = phaseFailing
@@ -85,49 +85,54 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if statusErr := r.Status().Update(ctx, instance); statusErr != nil {
 			odooLogger.Error(statusErr, "Failed to update instance status")
 		}
+		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, err
+	return result, nil
 }
 
-func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, instance *odoov1.OdooInstance) error {
+func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, instance *odoov1.OdooInstance) (ctrl.Result, error) {
 	instance.Status.Phase = phaseCreating
 	instance.Status.ObservedGeneration = instance.Generation
 
 	if err := r.reconcilePVC(ctx, instance); err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
 	conf, err := renderOdooConf(&instance.Spec)
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	if err := r.reconcileConfigMap(ctx, instance, conf); err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
 	secrets, err := r.referencedSecrets(ctx, instance)
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	addons, err := r.listReadyAddons(ctx, instance)
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
+	}
+	gate, err := r.gateAddonsRollout(ctx, instance, addonsHash(addons))
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	hashes := rolloutHashes{
 		config:  configHash(conf),
 		secrets: secretsHash(secrets),
-		addons:  addonsHash(addons),
+		addons:  gate.templateHash,
 	}
 
 	if err := r.reconcileDeployment(ctx, instance, hashes); err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	if err := r.reconcilePDB(ctx, instance); err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	if err := r.reconcileService(ctx, instance); err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
 	// Derive addonPaths from Synced OdooAddon objects; avoids a cross-controller status write race.
@@ -147,7 +152,18 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		instance.Status.Phase = phaseCreating
 		instance.Status.Ready = false
 	}
-	return r.Status().Update(ctx, instance)
+
+	// While an upgrade runs the old pods keep serving, so Ready keeps following the
+	// Deployment; only the phase text changes. A failed upgrade is not ready.
+	result := ctrl.Result{}
+	if gate.phase != "" {
+		instance.Status.Phase = gate.phase
+	}
+	if gate.phase == gatePhaseUpgradeFailed {
+		instance.Status.Ready = false
+		result.RequeueAfter = gateFailedRequeue
+	}
+	return result, r.Status().Update(ctx, instance)
 }
 
 // referencedSecrets fetches every Secret the pod consumes. A missing Secret is
@@ -334,6 +350,7 @@ func (r *OdooInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&odoov1.OdooUpgrade{}).
 		Watches(
 			&odoov1.OdooAddon{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {

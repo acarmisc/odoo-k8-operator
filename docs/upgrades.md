@@ -38,6 +38,8 @@ spec:
 | `spec.installModules` | list of string | none | max 100 items, each `^[a-zA-Z0-9_]+$` | Passed to `-i`. |
 | `spec.database` | string | the instance's `postgres.database` | `^[a-zA-Z0-9_.-]+$` | Database to upgrade. |
 | `spec.timeoutSeconds` | int64 | `1800` | 60 to 86400 | Job `activeDeadlineSeconds`. |
+| `spec.withDemo` | bool | `false` | none | With `installModules`, demo data is loaded only when `true`. Otherwise the Job passes `--without-demo=all`. |
+| `spec.adminUserPasswordSecret` | string | none | non-empty when set | Secret in the same namespace, key `password`. After `installModules` succeeded, the password of the Odoo user `admin` is set through `odoo shell`. Requires `installModules`. |
 
 Rules:
 
@@ -89,15 +91,17 @@ Upgrades for one instance run **one at a time**. An upgrade starts only when no 
 The operator creates a Job named `<name>-run`, owned by the OdooUpgrade. The command is:
 
 ```text
-odoo --config /etc/odoo/odoo.conf -d <database> [-u <modules>] [-i <installModules>] --stop-after-init --no-http
+odoo --config /etc/odoo/odoo.conf -d <database> [-u <modules>] [-i <installModules> [--without-demo=all]] --stop-after-init --no-http
 ```
+
+With `adminUserPasswordSecret` set, the container runs `/bin/sh -c` instead. The script runs the install above, then `odoo shell` with a short Python snippet on stdin that sets the password from the environment variable `ODOO_ADMIN_USER_PASSWORD`. `set -e` makes the Job fail when either step fails. The password is not in the arguments, the script or the log.
 
 | Setting | Value |
 |---|---|
 | Image | The instance's `image`. |
 | Config, addons, data | Same volumes as the Odoo pods. Addons are read-only, the filestore is read-write. |
 | Database credentials | `PGPASSWORD` and `DB_PASSWORD` from `postgres.passwordSecret`, `PGSSLMODE=require`. |
-| Admin password | Not set. The Job never starts the HTTP server. |
+| Admin password | Not set, and the HTTP server never starts. With `adminUserPasswordSecret`, only `ODOO_ADMIN_USER_PASSWORD` is set, from that Secret. |
 | Security | UID and GID `100`, non-root, read-only root filesystem, all capabilities dropped, no privilege escalation, `RuntimeDefault` seccomp, no service account token. |
 | Resources | The instance's `resources`. |
 | Retries | `backoffLimit: 0`. A failed run is final. |
@@ -137,7 +141,7 @@ kubectl -n odoo get odooupgrade shop-upgrade-1 -w
 
 A manual upgrade does **not** hold the pods. It only runs `odoo -u` against the database.
 
-To initialise an empty database with the base module, use `installModules`:
+To install modules into an existing database, use `installModules`:
 
 ```yaml
 spec:
@@ -146,7 +150,19 @@ spec:
   installModules: ["base"]
 ```
 
-The database must already exist. The operator does not create it. This path has not been run against a live cluster in this repository, so check the Job log.
+The database must already exist, or the database user must be able to create it. For a new instance, prefer `spec.initialize` on the OdooInstance, which also sets the admin password. See [odooinstance.md](odooinstance.md#database-initialisation).
+
+To set the password of the Odoo user `admin` in the same run, add `adminUserPasswordSecret`. It requires `installModules`:
+
+```yaml
+spec:
+  instanceRef:
+    name: shop
+  installModules: ["base"]
+  adminUserPasswordSecret: shop-init-admin   # Secret, key "password"
+```
+
+The install and the password step have not been run against a real Odoo in CI. Check the Job log on your cluster.
 
 ## Automatic upgrades (spec.upgrade)
 

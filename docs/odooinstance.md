@@ -61,6 +61,11 @@ spec:
 | `upgrade` | object | none | Automatic module upgrades. See [upgrades.md](upgrades.md#automatic-upgrades-specupgrade). |
 | `upgrade.modules` | list of string | required | Modules for `odoo -u`. Use `["all"]` for every module. Min 1, max 100 items. Each item matches `^[a-zA-Z0-9_]+$`. |
 | `upgrade.timeoutSeconds` | int64 | `1800` | Deadline for each generated OdooUpgrade Job. Min 60, max 86400. |
+| `initialize` | object | none | One-time database initialisation. See [Database initialisation](#database-initialisation). Can only be set when the instance is created. |
+| `initialize.modules` | list of string | required | Modules for `odoo -i`. `["base"]` is the minimal value and creates an empty Odoo database. Min 1, max 100 items, each `^[a-zA-Z0-9_]+$`. |
+| `initialize.adminUserPasswordSecret` | string | required | Secret in the same namespace, key `password`. Its value becomes the password of the Odoo user `admin`. |
+| `initialize.withDemo` | bool | `false` | Load demo data. `false` passes `--without-demo=all`. |
+| `initialize.timeoutSeconds` | int64 | `1800` | Deadline for the initialisation Job. Min 60, max 86400. |
 
 ### Resources default
 
@@ -83,6 +88,9 @@ Rules enforced by the CRD (CEL) at admission time:
 - `postgres.port` is between 1 and 65535.
 - `upgrade.modules` has 1 to 100 items, each matching `^[a-zA-Z0-9_]+$`.
 - `upgrade.timeoutSeconds` is between 60 and 86400.
+- `initialize.modules` has 1 to 100 items, each matching `^[a-zA-Z0-9_]+$`.
+- `initialize.adminUserPasswordSecret` is required and not empty when `initialize` is set.
+- `spec.initialize` cannot be added to an existing OdooInstance (a transition rule). Adding it would re-initialise a live database. Removing it is allowed.
 
 Rules checked by the controller (not at admission). A violation sets `status.phase: Failed` and the reason is only in the operator log:
 
@@ -147,6 +155,8 @@ The hash of this file is a pod-template annotation. Any change to it rolls the p
 | `status.addonPaths` | list of string | One entry per ready OdooAddon bound to this instance: `/mnt/odoo/addons/<moduleName or addon name>`. For a multi-module repo this is one entry for the OdooAddon, not one per module. |
 | `status.appliedAddonsHash` | string | Addons revision the running pods were rolled out with. With `spec.upgrade` set, it only advances after the matching upgrade succeeded. |
 | `status.activeUpgrade` | string | Name of the OdooUpgrade that currently holds the rollout, if any. |
+| `status.initialized` | bool | `true` once `spec.initialize` succeeded, or was skipped because the Deployment already had ready pods. |
+| `status.initUpgrade` | string | Name of the initialisation OdooUpgrade (`<name>-init`) while it runs or after it failed. |
 | `status.observedGeneration` | int64 | Generation the operator last reconciled. |
 | `status.conditions` | list | `Ready`, `Progressing` and `Degraded`. See below. |
 | `status.message` | string | Summary of the state: the `Degraded` message while degraded, otherwise the `Ready` message while not ready. |
@@ -160,19 +170,53 @@ Phases:
 | `Failed` | The last reconcile returned an error (for example a missing Secret or an invalid `config`). The next successful reconcile clears it. |
 | `Upgrading` | A new addons revision is ready, and the pods stay on the previous revision until the OdooUpgrade succeeds. |
 | `UpgradeFailed` | The OdooUpgrade failed. The pods stay on the previous revision and `ready` is `false`. |
+| `Initializing` | `spec.initialize` is running. The Deployment has 0 replicas. |
+| `InitializationFailed` | The initialisation OdooUpgrade failed. The Deployment stays at 0 replicas. See [operations.md](operations.md#initialisation-failed). |
 
 Conditions use the usual Kubernetes shape: `type`, `status`, `reason`, `message`, `lastTransitionTime` and `observedGeneration`. Read the `reason` for scripts and the `message` for people.
 
 | Type | Status | Reasons |
 |---|---|---|
 | `Ready` | `True` | `AllReplicasReady`: the Deployment has `replicas` ready pods. |
-| `Ready` | `False` | `DeploymentNotReady`, `UpgradeFailed`, `MissingSecret`, `InvalidConfig`, `ReconcileError`. |
-| `Progressing` | `True` | `Reconciling`: the Deployment is rolling out. `Upgrading`: an OdooUpgrade holds the rollout. |
-| `Progressing` | `False` | `Reconciled`, `UpgradeFailed`, `ReconcileError`. |
+| `Ready` | `False` | `DeploymentNotReady`, `UpgradeFailed`, `Initializing`, `InitializationFailed`, `MissingSecret`, `InvalidConfig`, `ReconcileError`. |
+| `Progressing` | `True` | `Reconciling`: the Deployment is rolling out. `Upgrading`: an OdooUpgrade holds the rollout. `Initializing`: the database is being initialised. |
+| `Progressing` | `False` | `Reconciled`, `UpgradeFailed`, `InitializationFailed`, `ReconcileError`. |
 | `Degraded` | `False` | `AsExpected`. |
-| `Degraded` | `True` | `MissingSecret`, `InvalidConfig`, `ReconcileError`, `UpgradeFailed`. |
+| `Degraded` | `True` | `MissingSecret`, `InvalidConfig`, `ReconcileError`, `UpgradeFailed`, `InitializationFailed`. |
 
 `MissingSecret` names a Secret that does not exist. `InvalidConfig` is a bad `spec.config` key or value, or a bad size. The `ReconcileFailed` Event carries the same message. For the commands, see [operations.md](operations.md#read-the-state).
+
+## Database initialisation
+
+A new instance has an empty database, which Odoo cannot serve until its base modules are installed. The database manager is off (`list_db = False`), so there is no UI to do this. A new instance therefore needs a one-time initialisation. Set `spec.initialize` and the operator does it:
+
+```yaml
+spec:
+  postgres:
+    host: postgres.databases.svc.cluster.local
+    port: 5432
+    database: shop
+    user: odoo
+    passwordSecret: shop-db
+  initialize:
+    modules: ["base"]
+    adminUserPasswordSecret: shop-init-admin   # Secret, key "password"
+```
+
+What the operator does:
+
+1. It creates the OdooUpgrade `<name>-init`, owned by the instance. The OdooUpgrade runs `odoo -d <database> -i <modules> --stop-after-init`, with `--without-demo=all` unless `withDemo` is `true`. Then it sets the password of the Odoo user `admin` through `odoo shell`. The Job fails if either step fails.
+2. Until the OdooUpgrade succeeds, the Deployment has **0 replicas** and the phase is `Initializing`. No Odoo pod runs against an empty database. The other objects (ConfigMap, Service, PVCs, PodDisruptionBudget) are reconciled as usual, because the Job needs them.
+3. On success, `status.initialized` becomes `true`, `status.initUpgrade` is cleared, the Deployment is scaled to `replicas` and the `Initialized` Event is emitted.
+4. On failure, the phase is `InitializationFailed`, `Degraded` is `True` with the failure message, the Deployment stays at 0 replicas and the reconcile is repeated every 60 seconds. Retry as described in [operations.md](operations.md#initialisation-failed).
+
+Rules and limits:
+
+- The default `admin` password (`admin`) is never left in place by this path. The password comes only from the Secret, through the environment of the Job. It never appears in the arguments or in the log.
+- Modules other than `base` must already be Synced as OdooAddons. `-i` cannot find a module that is not in `addons_path`. For a new instance, initialise with `base`, then install more modules with a manual OdooUpgrade (see [upgrades.md](upgrades.md#manual-upgrade)).
+- The database must exist, or the database user needs `CREATEDB`. See [production-guide.md](production-guide.md#first-installation).
+- An instance whose Deployment already has ready pods and no `<name>-init` OdooUpgrade is treated as initialised. Nothing is run, and a `Warning` Event `InitializationSkipped` says so. This guards a live database against a second `-i`.
+- The initialisation has not been run against a real Odoo in CI. The tests use envtest (a real API server, no Odoo). Check the first Job log on your own cluster.
 
 ## Generated objects
 
@@ -187,6 +231,7 @@ Names use the OdooInstance name `<name>`:
 | PVC | `<name>-data` | Owned only if `dataVolume.retainOnDelete: false`. |
 | PodDisruptionBudget | `<name>` | Only while `replicas > 1`. `maxUnavailable: 1`. |
 | OdooUpgrade | `<name>-upg-<8 hex chars>` | Created by the operator when `spec.upgrade` is set and the addons revision changes. Owned by the instance. |
+| OdooUpgrade | `<name>-init` | Created by the operator when `spec.initialize` is set, until the database is initialised. Owned by the instance. |
 
 Both PVCs are created on the first reconcile, even when the instance has one replica. PVC specs are not changed after creation: a new `size` in the spec does not resize an existing PVC.
 

@@ -103,6 +103,10 @@ type instanceCondFacts struct {
 	ActiveUpgrade string
 	// UpgradeMessage is the failed upgrade's status.message.
 	UpgradeMessage string
+	// InitUpgrade names the OdooUpgrade doing the database initialisation, if any.
+	InitUpgrade string
+	// InitMessage is the failed initialisation's status.message.
+	InitMessage string
 	// ErrReason and ErrMessage are set when the reconcile returned an error.
 	ErrReason  string
 	ErrMessage string
@@ -150,6 +154,26 @@ func instanceConditions(f instanceCondFacts) []metav1.Condition {
 			newCondition(odoov1.ConditionTypeProgressing, condTrue, odoov1.ReasonUpgrading,
 				fmt.Sprintf("OdooUpgrade %q is running; pods stay on the previous addons revision", f.ActiveUpgrade)),
 			healthy,
+		}
+	case phaseInitializing:
+		return []metav1.Condition{
+			newCondition(odoov1.ConditionTypeReady, condFalse, odoov1.ReasonInitializing,
+				fmt.Sprintf("OdooUpgrade %q is initialising the database; pods stay at 0 replicas", f.InitUpgrade)),
+			newCondition(odoov1.ConditionTypeProgressing, condTrue, odoov1.ReasonInitializing,
+				"database initialisation is running"),
+			healthy,
+		}
+	case phaseInitFailed:
+		detail := f.InitMessage
+		if detail == "" {
+			detail = initMsgFailedDefault
+		}
+		msg := fmt.Sprintf("OdooUpgrade %q failed; pods stay at 0 replicas: %s", f.InitUpgrade, detail)
+		return []metav1.Condition{
+			newCondition(odoov1.ConditionTypeReady, condFalse, odoov1.ReasonInitializationFailed, msg),
+			newCondition(odoov1.ConditionTypeProgressing, condFalse, odoov1.ReasonInitializationFailed,
+				"initialisation stopped; delete the failed OdooUpgrade to retry"),
+			newCondition(odoov1.ConditionTypeDegraded, condTrue, odoov1.ReasonInitializationFailed, msg),
 		}
 	case gatePhaseUpgradeFailed:
 		msg := fmt.Sprintf("OdooUpgrade %q failed; pods stay on the previous addons revision", f.ActiveUpgrade)

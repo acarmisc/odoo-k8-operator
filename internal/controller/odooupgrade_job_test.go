@@ -115,7 +115,7 @@ func TestUpgradeArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := upgradeArgs(tt.database, tt.modules, tt.installModules)
+			got := upgradeArgs(tt.database, tt.modules, tt.installModules, true)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("upgradeArgs() = %q, want %q", got, tt.want)
 			}
@@ -227,7 +227,7 @@ func TestBuildUpgradeJobHardening(t *testing.T) {
 	assertNoOdooServiceLabels(t, job.Spec.Template.Labels)
 	assertUpgradeJobSpec(t, &job.Spec)
 	assertUpgradePodSpec(t, &job.Spec.Template.Spec, tuImage)
-	if !reflect.DeepEqual(job.Spec.Template.Spec.Containers[0].Args, upgradeArgs(tuDatabase, []string{tuModuleSale}, nil)) {
+	if !reflect.DeepEqual(job.Spec.Template.Spec.Containers[0].Args, upgradeArgs(tuDatabase, []string{tuModuleSale}, nil, true)) {
 		t.Errorf("args = %q", job.Spec.Template.Spec.Containers[0].Args)
 	}
 	if job.Spec.Template.Spec.NodeSelector != nil {

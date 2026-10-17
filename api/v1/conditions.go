@@ -46,6 +46,10 @@ const (
 	ReasonUpgradeFailed      = "UpgradeFailed"
 	ReasonMissingSecret      = "MissingSecret"
 	ReasonInvalidConfig      = "InvalidConfig"
+	// ReasonInitializing: spec.initialize's OdooUpgrade is creating the database; pods stay at zero.
+	ReasonInitializing = "Initializing"
+	// ReasonInitializationFailed: the initialisation OdooUpgrade failed; pods stay at zero.
+	ReasonInitializationFailed = "InitializationFailed"
 
 	// Reasons used by OdooAddon.
 	ReasonSynced           = "Synced"

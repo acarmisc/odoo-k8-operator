@@ -244,7 +244,7 @@ var _ = Describe("OdooUpgrade conditions and events", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: cxUpgrade, Namespace: testNamespace},
 			Spec: odoov1.OdooUpgradeSpec{
 				InstanceRef: odoov1.OdooInstanceRef{Name: cxInstUpgrade},
-				Modules:     []string{"base"},
+				Modules:     []string{tiEnvModule},
 			},
 		}
 		Expect(k8sClient.Create(ctx, up)).To(Succeed())

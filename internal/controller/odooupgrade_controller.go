@@ -281,6 +281,9 @@ func upgradeValidateSpec(up *odoov1.OdooUpgrade) error {
 	if slices.Contains(up.Spec.Modules, upgradeAllModules) && len(up.Spec.Modules) > 1 {
 		return fmt.Errorf("modules: %q must be the only entry when used", upgradeAllModules)
 	}
+	if up.Spec.AdminUserPasswordSecret != "" && len(up.Spec.InstallModules) == 0 {
+		return errors.New("adminUserPasswordSecret requires installModules")
+	}
 	return nil
 }
 

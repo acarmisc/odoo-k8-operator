@@ -50,6 +50,14 @@ type OdooUpgradeSpec struct {
 	// +kubebuilder:validation:Minimum=60
 	// +kubebuilder:validation:Maximum=86400
 	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
+	// WithDemo loads demo data when installModules is set. Defaults to false, which
+	// passes --without-demo=all.
+	WithDemo bool `json:"withDemo,omitempty"`
+	// AdminUserPasswordSecret names a Secret in the same namespace (key "password"). After
+	// installModules succeeded, the value becomes the password of the Odoo user "admin",
+	// set through `odoo shell`. The value reaches the Job only as an environment variable.
+	// Requires installModules.
+	AdminUserPasswordSecret string `json:"adminUserPasswordSecret,omitempty"`
 }
 
 type OdooUpgradeStatus struct {

@@ -21,7 +21,7 @@ This guide lists what to decide and check before you run Odoo on this operator f
 
 - [ ] Storage: `ReadWriteMany` on both volumes if you run more than one replica. ([Storage](#storage))
 - [ ] Secrets: database and master passwords in Secrets, with key `password`. ([Secrets](#secrets))
-- [ ] Database: PostgreSQL accepts TLS, and the database is created and initialised. ([Database](#database))
+- [ ] Database: PostgreSQL accepts TLS, and the database is created and initialised. ([Database](#database), [First installation](#first-installation))
 - [ ] Git: pin `gitRef` to a commit SHA. Use a `gitSecretRef` for private repositories. ([odooaddon.md](odooaddon.md#branches-tags-and-commit-shas))
 - [ ] Upgrades: decide whether `spec.upgrade` gates rollouts, and test it. ([upgrades.md](upgrades.md))
 - [ ] Network: add a NetworkPolicy per instance. The operator does not create one. ([Security](#security))
@@ -72,9 +72,63 @@ Other storage points:
 
 - The operator connects with `db_host`, `db_port`, `db_name`, `db_user` and the password from the Secret.
 - It always sets `db_sslmode = require`. Your database must accept TLS. There is no field for a custom CA, so a self-signed database certificate is not supported by the generated config.
-- The operator does **not** create or initialise the database. Create the database first. For an empty database, initialise it with an OdooUpgrade that installs `base`. See [upgrades.md](upgrades.md#manual-upgrade).
+- The operator does **not** create the database by itself. The database must exist, or the database user must be able to create it. To initialise a new database, set `spec.initialize`. See [First installation](#first-installation).
 - Put a connection pooler in front of the database only after you have tested it with Odoo.
 - Set `postgres.port`. When `postgres.database` is set and the port is unset, the generated `db_port` is `0`.
+
+## First installation
+
+A runbook for a new instance with an empty database. Change nothing else in the spec.
+
+1. Create the Secrets. Each one has the key `password`:
+
+   ```bash
+   kubectl -n odoo create secret generic shop-db --from-literal=password='<database password>'
+   kubectl -n odoo create secret generic shop-admin --from-literal=password='<master password>'
+   kubectl -n odoo create secret generic shop-init-admin --from-literal=password='<password of user admin>'
+   ```
+
+2. Make sure the database can be created by the operator's run. Either:
+   - the database user has `CREATEDB`, and Odoo creates the database during the install; or
+   - create an empty database owned by the user, for example `CREATE DATABASE shop OWNER odoo;`. Odoo then only installs into it.
+
+   Odoo's default `admin` password is never used, because `spec.initialize` sets it.
+
+3. Apply the OdooInstance with `postgres` set and `initialize` added:
+
+   ```yaml
+   apiVersion: odoo.operator.io/v1
+   kind: OdooInstance
+   metadata:
+     name: shop
+     namespace: odoo
+   spec:
+     image: odoo:19.0
+     adminPasswordSecret: shop-admin
+     postgres:
+       host: pg-rw.databases.svc.cluster.local
+       port: 5432
+       database: shop
+       user: odoo
+       passwordSecret: shop-db
+     initialize:
+       modules: ["base"]
+       adminUserPasswordSecret: shop-init-admin
+   ```
+
+4. Watch the initialisation. The phase is `Initializing` while the Deployment has 0 replicas:
+
+   ```bash
+   kubectl -n odoo get odooinstance shop -w
+   kubectl -n odoo get odooupgrade shop-init
+   kubectl -n odoo logs job/shop-init-run
+   ```
+
+5. When the instance is `Running`, the first install is done. Install other modules with a manual OdooUpgrade, after their OdooAddons are Synced.
+
+If the phase becomes `InitializationFailed`, see [operations.md](operations.md#initialisation-failed).
+
+The install path has not been run against a live Odoo in CI. The tests use envtest only.
 
 ## Scaling and availability
 

@@ -50,11 +50,15 @@ const (
 	eventReasonStarted         = "Started"
 	eventReasonSucceeded       = "Succeeded"
 	eventReasonFailed          = "Failed"
+	eventReasonInitialized     = "Initialized"
+	eventReasonInitFailed      = "InitializationFailed"
+	eventReasonInitSkipped     = "InitializationSkipped"
 
 	eventActionReconcile = "Reconcile"
 	eventActionSync      = "Sync"
 	eventActionCleanup   = "Cleanup"
 	eventActionUpgrade   = "Upgrade"
+	eventActionInit      = "Initialize"
 
 	// eventNoteMax bounds an event message. Job log tails can be large, and an event is
 	// meant to be read at a glance; the full text stays in status.message or the logs.
@@ -90,12 +94,18 @@ func newlyTrue(before, after []metav1.Condition, typ string) *metav1.Condition {
 func instanceEvents(before, after odoov1.OdooInstanceStatus, succeededUpgrade string) []statusEvent {
 	var evs []statusEvent
 	if c := newlyTrue(before.Conditions, after.Conditions, odoov1.ConditionTypeDegraded); c != nil {
-		if c.Reason == odoov1.ReasonUpgradeFailed {
+		switch c.Reason {
+		case odoov1.ReasonUpgradeFailed:
 			evs = append(evs, statusEvent{
 				Type: corev1.EventTypeWarning, Reason: eventReasonUpgradeFailed, Action: eventActionUpgrade,
 				Message: c.Message, RelatedUpgrade: after.ActiveUpgrade,
 			})
-		} else {
+		case odoov1.ReasonInitializationFailed:
+			evs = append(evs, statusEvent{
+				Type: corev1.EventTypeWarning, Reason: eventReasonInitFailed, Action: eventActionInit,
+				Message: c.Message, RelatedUpgrade: after.InitUpgrade,
+			})
+		default:
 			evs = append(evs, statusEvent{
 				Type: corev1.EventTypeWarning, Reason: eventReasonReconcileFailed, Action: eventActionReconcile,
 				Message: c.Message,

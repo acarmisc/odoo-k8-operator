@@ -51,6 +51,13 @@ spec:
               the database of an OdooInstance. The spec is immutable: to run another upgrade create
               a new OdooUpgrade.
             properties:
+              adminUserPasswordSecret:
+                description: |-
+                  AdminUserPasswordSecret names a Secret in the same namespace (key "password"). After
+                  installModules succeeded, the value becomes the password of the Odoo user "admin",
+                  set through `odoo shell`. The value reaches the Job only as an environment variable.
+                  Requires installModules.
+                type: string
               database:
                 description: Database to upgrade. Defaults to the instance's postgres.database.
                 pattern: ^[a-zA-Z0-9_.-]+$
@@ -89,6 +96,11 @@ spec:
                 maximum: 86400
                 minimum: 60
                 type: integer
+              withDemo:
+                description: |-
+                  WithDemo loads demo data when installModules is set. Defaults to false, which
+                  passes --without-demo=all.
+                type: boolean
             required:
             - instanceRef
             type: object

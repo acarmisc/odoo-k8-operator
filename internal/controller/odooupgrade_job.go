@@ -47,6 +47,12 @@ const (
 	upgradeFlagStop    = "--stop-after-init"
 	upgradeFlagNoHTTP  = "--no-http"
 	upgradeFlagConfig  = "--config"
+	upgradeFlagNoDemo  = "--without-demo=all"
+	upgradeSubcmdShell = "shell"
+	upgradeShellPath   = "/bin/sh"
+	upgradeShellFlag   = "-c"
+
+	envAdminUserPassword = "ODOO_ADMIN_USER_PASSWORD"
 
 	upgradeDefaultTimeout = int64(1800)
 	upgradeTTLSeconds     = int32(86400)
@@ -106,15 +112,39 @@ func upgradeTimeout(up *odoov1.OdooUpgrade) int64 {
 
 // upgradeArgs builds the odoo command line. The official image entrypoint passes
 // arguments starting with '-' straight to odoo, exactly like the Deployment's args.
-func upgradeArgs(database string, modules, installModules []string) []string {
+// Demo data is skipped for installs unless withDemo is set.
+func upgradeArgs(database string, modules, installModules []string, withDemo bool) []string {
 	args := []string{upgradeFlagConfig, odooConfPath, upgradeFlagDB, database}
 	if len(modules) > 0 {
 		args = append(args, upgradeFlagUpdate, strings.Join(modules, ","))
 	}
 	if len(installModules) > 0 {
 		args = append(args, upgradeFlagInstall, strings.Join(installModules, ","))
+		if !withDemo {
+			args = append(args, upgradeFlagNoDemo)
+		}
 	}
 	return append(args, upgradeFlagStop, upgradeFlagNoHTTP)
+}
+
+// upgradeCommand returns the container command and args. Without an admin password the
+// command is nil and args are the odoo arguments for the image entrypoint. With one,
+// /bin/sh runs the install and then sets the password (see upgradeInitScript).
+func upgradeCommand(up *odoov1.OdooUpgrade, database string) (command, args []string) {
+	args = upgradeArgs(database, up.Spec.Modules, up.Spec.InstallModules, up.Spec.WithDemo)
+	if up.Spec.AdminUserPasswordSecret == "" {
+		return nil, args
+	}
+	return []string{upgradeShellPath, upgradeShellFlag}, []string{upgradeInitScript(database, args)}
+}
+
+// upgradeEnvFor is upgradeEnv plus the admin password variable when the upgrade sets one.
+func upgradeEnvFor(up *odoov1.OdooUpgrade, spec *odoov1.OdooInstanceSpec) []corev1.EnvVar {
+	env := upgradeEnv(spec)
+	if up.Spec.AdminUserPasswordSecret != "" {
+		env = append(env, secretKeyEnv(envAdminUserPassword, up.Spec.AdminUserPasswordSecret))
+	}
+	return env
 }
 
 // upgradeAccessMode returns the access mode with the default (ReadWriteOnce) applied.
@@ -178,6 +208,7 @@ func buildUpgradeJob(up *odoov1.OdooUpgrade, inst *odoov1.OdooInstance, database
 	readOnlyRoot := true
 	labels := upgradeLabels(up.Name)
 
+	command, args := upgradeCommand(up, database)
 	podSpec := corev1.PodSpec{
 		RestartPolicy:                corev1.RestartPolicyNever,
 		AutomountServiceAccountToken: upgradePtr(false),
@@ -194,8 +225,9 @@ func buildUpgradeJob(up *odoov1.OdooUpgrade, inst *odoov1.OdooInstance, database
 			{
 				Name:      upgradeContainerName,
 				Image:     upgradeImage(spec),
-				Args:      upgradeArgs(database, up.Spec.Modules, up.Spec.InstallModules),
-				Env:       upgradeEnv(spec),
+				Command:   command,
+				Args:      args,
+				Env:       upgradeEnvFor(up, spec),
 				Resources: odooResources(spec),
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: volumeConfig, MountPath: mountPathConfig, ReadOnly: true},

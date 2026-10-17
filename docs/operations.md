@@ -14,6 +14,7 @@ Day-2 tasks with `kubectl`: how to read the state, what each phase means, and wh
 - [Addon in Failed](#addon-in-failed)
 - [Forcing a re-sync](#forcing-a-re-sync)
 - [Upgrade failed](#upgrade-failed)
+- [Initialisation failed](#initialisation-failed)
 - [Instance stuck in Upgrading](#instance-stuck-in-upgrading)
 - [Common error messages](#common-error-messages)
 
@@ -45,7 +46,7 @@ Each kind has `Ready`, `Progressing` and `Degraded` conditions, or `Succeeded` a
 
 | Object | Normal | Warning |
 |---|---|---|
-| OdooInstance | `RolledOut`, `UpgradeStarted`, `UpgradeSucceeded` | `ReconcileFailed`, `UpgradeFailed` |
+| OdooInstance | `RolledOut`, `UpgradeStarted`, `UpgradeSucceeded`, `Initialized` | `ReconcileFailed`, `UpgradeFailed`, `InitializationFailed`, `InitializationSkipped` |
 | OdooAddon | `SyncStarted`, `SyncSucceeded` | `SyncFailed`, `ModuleConflict`, `CleanupFailed`, `CleanupTimeout` |
 | OdooUpgrade | `Started`, `Succeeded` | `Failed` |
 
@@ -242,6 +243,41 @@ Use these in order. Each one is safe.
 
    - **Manual upgrade:** the spec is immutable, so create a new OdooUpgrade with a new name. Delete the failed one too.
 
+## Initialisation failed
+
+**Symptom:** the OdooInstance phase is `InitializationFailed`, and its `Degraded` condition is `True` with reason `InitializationFailed`. The Deployment has 0 replicas.
+
+1. Read the message:
+
+   ```bash
+   kubectl -n odoo get odooupgrade shop-init -o jsonpath='{.status.message}{"\n"}'
+   ```
+
+2. Read the Job log, which is kept for 24 hours:
+
+   ```bash
+   kubectl -n odoo logs job/shop-init-run
+   ```
+
+3. Fix the cause. Common ones:
+   - the database is not reachable, or the database password is wrong;
+   - the database does not exist, and the database user has no `CREATEDB`;
+   - a module in `spec.initialize.modules` is not in the addons, because its OdooAddon is not Synced or the name is wrong;
+   - the Secret `spec.initialize.adminUserPasswordSecret` is missing (the reason is `MissingSecret`, and no Job is created);
+   - the run hit `timeoutSeconds`.
+
+   If the failed run already created part of the database, restore an empty database before you retry. The operator never drops data.
+
+4. Retry. Delete the failed OdooUpgrade and wait for its Job to be removed. `--cascade=foreground` waits for the Job, so the new run does not adopt the old one:
+
+   ```bash
+   kubectl -n odoo delete odooupgrade shop-init --cascade=foreground
+   ```
+
+   The operator re-creates `shop-init` on the next reconcile. The Deployment stays at 0 replicas until the new run succeeds.
+
+If you only added `spec.initialize` to a Deployment that already runs pods, nothing is run. The instance is marked initialised and the `InitializationSkipped` Event explains it. Remove `spec.initialize` if it is not needed.
+
 ## Instance stuck in Upgrading
 
 **Symptom:** `PHASE` is `Upgrading`. The pods run the previous addons revision. This is intended while the upgrade runs.
@@ -289,6 +325,13 @@ Deleting a `Running` OdooUpgrade also deletes its Job. The operator then creates
 | `sync job <name> produced no commit hash output` | The script ended without printing a SHA. Read the log tail. |
 | `Authentication failed`, `Permission denied (publickey)`, `Repository not found` (in the log tail) | Git cannot authenticate, or the repository does not exist or is not visible to the credentials. |
 
+### Initialisation (`Degraded` condition message)
+
+| Message | Meaning and fix |
+|---|---|
+| `secret "<name>" referenced by spec.initialize.adminUserPasswordSecret does not exist` | Create the Secret with key `password`. Reason `MissingSecret`. |
+| `OdooUpgrade "<name>-init" failed; pods stay at 0 replicas: ...` | Read the Job log, as in [Initialisation failed](#initialisation-failed). |
+
 ### Upgrade (`status.message`)
 
 | Message | Meaning and fix |
@@ -300,6 +343,7 @@ Deleting a `Running` OdooUpgrade also deletes its Job. The operator then creates
 | `upgrade Job <name> no longer exists` | The Job was deleted before the upgrade finished. Retry. |
 | `upgrade pod failed` | The pod failed without a reason. Read the Job log. |
 | `DeadlineExceeded` | The run hit `timeoutSeconds`. Raise it, then retry. |
+| `adminUserPasswordSecret requires installModules` | Set `installModules`, or remove `adminUserPasswordSecret`. |
 
 ## See also
 

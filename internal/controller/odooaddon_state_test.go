@@ -299,7 +299,7 @@ func TestSyncSpecHash(t *testing.T) {
 		"secretName":  func(s *syncSpec) { s.SecretName = testSecretName },
 		"addonName":   func(s *syncSpec) { s.AddonName = "other-addon" },
 	}
-	seen := map[string]string{syncSpecHash(base): "base"}
+	seen := map[string]string{syncSpecHash(base): tiEnvModule}
 	for field, mutate := range changes {
 		h := syncSpecHash(testSpec(mutate))
 		if other, dup := seen[h]; dup {

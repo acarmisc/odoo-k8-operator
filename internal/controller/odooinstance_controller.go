@@ -130,9 +130,22 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	gate, err := r.gateAddonsRollout(ctx, instance, addonsHash(addons))
+	initDec, err := r.decideInitialization(ctx, instance)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	instance.Status.Initialized = initDec.initialized
+	instance.Status.InitUpgrade = initDec.upgradeName
+
+	current := addonsHash(addons)
+	var gate gateDecision
+	if initDec.pending {
+		gate = initHoldGate(instance, current)
+	} else {
+		gate, err = r.gateAddonsRollout(ctx, instance, current)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	hashes := rolloutHashes{
 		config:  configHash(conf),
@@ -140,7 +153,11 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		addons:  gate.templateHash,
 	}
 
-	if err := r.reconcileDeployment(ctx, instance, hashes); err != nil {
+	replicas := desiredReplicas(&instance.Spec)
+	if initDec.pending {
+		replicas = 0
+	}
+	if err := r.reconcileDeployment(ctx, instance, hashes, replicas); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcilePDB(ctx, instance); err != nil {
@@ -182,6 +199,13 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		instance.Status.Ready = false
 		result.RequeueAfter = gateFailedRequeue
 	}
+	if initDec.pending {
+		instance.Status.Phase = initDec.phase
+		instance.Status.Ready = false
+	}
+	if initDec.phase == phaseInitFailed {
+		result.RequeueAfter = initFailedRequeue
+	}
 
 	setConditions(&instance.Status.Conditions, instance.Generation, instanceConditions(instanceCondFacts{
 		Phase:           instance.Status.Phase,
@@ -190,13 +214,16 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		DesiredReplicas: desired,
 		ActiveUpgrade:   instance.Status.ActiveUpgrade,
 		UpgradeMessage:  gate.upgradeMessage,
+		InitUpgrade:     instance.Status.InitUpgrade,
+		InitMessage:     initDec.failMessage,
 	}))
 	instance.Status.Message = instanceSummary(instance.Status.Conditions)
 
 	if err := r.Status().Update(ctx, instance); err != nil {
 		return result, err
 	}
-	emitEvents(r.Recorder, instance, instanceEvents(*before, instance.Status, gate.succeededUpgrade))
+	evs := append(instanceEvents(*before, instance.Status, gate.succeededUpgrade), initEvents(initDec)...)
+	emitEvents(r.Recorder, instance, evs)
 	return result, nil
 }
 
@@ -258,7 +285,10 @@ func (r *OdooInstanceReconciler) reconcileConfigMap(ctx context.Context, instanc
 	return err
 }
 
-func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instance *odoov1.OdooInstance, hashes rolloutHashes) error {
+// reconcileDeployment writes the Deployment. replicas is the pod count to run: the desired
+// count, or zero while the database is being initialised. The strategy always follows the
+// desired count, so it does not flip while the instance is held at zero.
+func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instance *odoov1.OdooInstance, hashes rolloutHashes, replicas int32) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -271,11 +301,10 @@ func (r *OdooInstanceReconciler) reconcileDeployment(ctx context.Context, instan
 			return err
 		}
 
-		replicas := desiredReplicas(&instance.Spec)
 		deploy.Labels = podLabels(instance.Name)
-		deploy.Spec.Replicas = &replicas
+		deploy.Spec.Replicas = int32Ptr(replicas)
 		deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: selectorLabels(instance.Name)}
-		deploy.Spec.Strategy = deploymentStrategy(replicas, instance.Spec.Data.AccessMode)
+		deploy.Spec.Strategy = deploymentStrategy(desiredReplicas(&instance.Spec), instance.Spec.Data.AccessMode)
 		deploy.Spec.Template = buildPodTemplate(instance, hashes)
 		return nil
 	})

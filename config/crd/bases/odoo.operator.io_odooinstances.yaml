@@ -104,6 +104,45 @@ spec:
                 type: string
               image:
                 type: string
+              initialize:
+                description: |-
+                  Initialize makes the operator create and initialise the database once, through an
+                  OdooUpgrade named <name>-init, before any pod is started. The Deployment stays at zero
+                  replicas until that succeeds. It is set at creation time only.
+                properties:
+                  adminUserPasswordSecret:
+                    description: |-
+                      AdminUserPasswordSecret names a Secret in the same namespace (key "password") whose
+                      value becomes the password of the Odoo user "admin". Required.
+                    minLength: 1
+                    type: string
+                  modules:
+                    description: Modules to install with -i. ["base"] is the minimal
+                      value and creates an empty Odoo database.
+                    items:
+                      pattern: ^[a-zA-Z0-9_]+$
+                      type: string
+                    maxItems: 100
+                    minItems: 1
+                    type: array
+                  timeoutSeconds:
+                    description: TimeoutSeconds bounds the initialisation Job. Defaults
+                      to 1800.
+                    format: int64
+                    maximum: 86400
+                    minimum: 60
+                    type: integer
+                  withDemo:
+                    description: WithDemo loads demo data. Defaults to false, which
+                      passes --without-demo=all.
+                    type: boolean
+                required:
+                - adminUserPasswordSecret
+                - modules
+                type: object
+                x-kubernetes-validations:
+                - message: adminUserPasswordSecret is required
+                  rule: size(self.adminUserPasswordSecret) > 0
               postgres:
                 properties:
                   database:
@@ -212,6 +251,9 @@ spec:
                 type: string
             type: object
             x-kubernetes-validations:
+            - message: 'spec.initialize cannot be added to an existing OdooInstance:
+                it would re-initialise a live database'
+              rule: '!has(self.initialize) || has(oldSelf.initialize)'
             - message: replicas > 1 requires dataVolume.accessMode=ReadWriteMany (the
                 filestore must be shared by all pods)
               rule: '!has(self.replicas) || self.replicas <= 1 || (has(self.dataVolume)
@@ -297,6 +339,16 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              initUpgrade:
+                description: |-
+                  InitUpgrade names the OdooUpgrade doing the database initialisation, while it runs
+                  or after it failed.
+                type: string
+              initialized:
+                description: |-
+                  Initialized is true once the database initialisation of spec.initialize has
+                  succeeded, or was skipped because the instance already served traffic.
+                type: boolean
               message:
                 description: Message is a human summary of the current state, e.g.
                   the reason for Degraded.

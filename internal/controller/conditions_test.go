@@ -145,9 +145,9 @@ func TestInstanceConditions(t *testing.T) {
 			name:  "error without a reason falls back to ReconcileError",
 			facts: instanceCondFacts{Phase: phaseFailing, ErrMessage: evMsgBoom},
 			want: []wantCond{
-				{odoov1.ConditionTypeReady, condFalse, odoov1.ReasonReconcileError, "boom"},
+				{odoov1.ConditionTypeReady, condFalse, odoov1.ReasonReconcileError, evMsgBoom},
 				{odoov1.ConditionTypeProgressing, condFalse, odoov1.ReasonReconcileError, "retried"},
-				{odoov1.ConditionTypeDegraded, condTrue, odoov1.ReasonReconcileError, "boom"},
+				{odoov1.ConditionTypeDegraded, condTrue, odoov1.ReasonReconcileError, evMsgBoom},
 			},
 		},
 	}

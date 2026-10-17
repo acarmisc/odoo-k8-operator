@@ -42,6 +42,32 @@ type OdooInstanceSpec struct {
 	// Upgrade makes the operator run `odoo -u <modules>` (via an OdooUpgrade) whenever the
 	// set of synced addon commits changes, and only roll the pods out once it succeeded.
 	Upgrade *UpgradeSpec `json:"upgrade,omitempty"`
+	// Initialize makes the operator create and initialise the database once, through an
+	// OdooUpgrade named <name>-init, before any pod is started. The Deployment stays at zero
+	// replicas until that succeeds. It is set at creation time only.
+	Initialize *InitializeSpec `json:"initialize,omitempty"`
+}
+
+// InitializeSpec describes the one-time database initialisation of an OdooInstance:
+// `odoo -d <database> -i <modules> --stop-after-init`, then the password of the Odoo
+// "admin" user is set through `odoo shell`.
+// +kubebuilder:validation:XValidation:rule="size(self.adminUserPasswordSecret) > 0",message="adminUserPasswordSecret is required"
+type InitializeSpec struct {
+	// Modules to install with -i. ["base"] is the minimal value and creates an empty Odoo database.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=100
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_]+$`
+	Modules []string `json:"modules"`
+	// WithDemo loads demo data. Defaults to false, which passes --without-demo=all.
+	WithDemo bool `json:"withDemo,omitempty"`
+	// AdminUserPasswordSecret names a Secret in the same namespace (key "password") whose
+	// value becomes the password of the Odoo user "admin". Required.
+	// +kubebuilder:validation:MinLength=1
+	AdminUserPasswordSecret string `json:"adminUserPasswordSecret"`
+	// TimeoutSeconds bounds the initialisation Job. Defaults to 1800.
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=86400
+	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
 }
 
 // UpgradeSpec configures automatic module upgrades for an OdooInstance.
@@ -106,6 +132,12 @@ type OdooInstanceStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 	// Message is a human summary of the current state, e.g. the reason for Degraded.
 	Message string `json:"message,omitempty"`
+	// Initialized is true once the database initialisation of spec.initialize has
+	// succeeded, or was skipped because the instance already served traffic.
+	Initialized bool `json:"initialized,omitempty"`
+	// InitUpgrade names the OdooUpgrade doing the database initialisation, while it runs
+	// or after it failed.
+	InitUpgrade string `json:"initUpgrade,omitempty"`
 	// AppliedAddonsHash is the addons hash the running pods were rolled out with. With
 	// spec.upgrade set it only advances after the matching OdooUpgrade succeeded.
 	AppliedAddonsHash string `json:"appliedAddonsHash,omitempty"`
@@ -124,6 +156,7 @@ type OdooInstance struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +kubebuilder:validation:XValidation:rule="!has(self.initialize) || has(oldSelf.initialize)",message="spec.initialize cannot be added to an existing OdooInstance: it would re-initialise a live database"
 	Spec   OdooInstanceSpec   `json:"spec,omitempty"`
 	Status OdooInstanceStatus `json:"status,omitempty"`
 }

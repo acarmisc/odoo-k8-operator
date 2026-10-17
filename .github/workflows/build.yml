@@ -89,7 +89,7 @@ jobs:
 
       - name: Scan image with Trivy
         if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: odoo-k8-operator:scan

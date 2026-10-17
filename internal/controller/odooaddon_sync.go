@@ -21,6 +21,9 @@ package controller
 // deterministic so it can be unit tested without an API server.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -85,6 +88,13 @@ const (
 	credentialsErrText = "gitUrl must not embed credentials; put them in gitSecretRef instead"
 )
 
+const (
+	// annotationSyncSpecHash records syncSpecHash on the Job so a reconcile can tell a
+	// Job built from the current spec from one built from an earlier spec.
+	annotationSyncSpecHash = "odoo.operator.io/sync-spec-hash"
+	syncSpecHashLen        = 16
+)
+
 // gitAuthMode says how the sync Job authenticates to the git remote.
 type gitAuthMode int
 
@@ -123,6 +133,18 @@ type syncSpec struct {
 	// SecretName is the gitSecretRef name, empty when no credentials are configured.
 	SecretName string
 	Auth       gitAuthMode
+}
+
+// syncSpecHash fingerprints every input that changes what the sync Job produces. It is
+// stored on the Job so a Job built from an older spec is never mistaken for the current one.
+func syncSpecHash(s syncSpec) string {
+	// json.Marshal of a slice is unambiguous (every field is quoted and escaped), so
+	// values that contain separators cannot make two different specs hash the same.
+	fields, _ := json.Marshal([]string{
+		s.GitURL, s.GitRef, s.AddonPath, s.ModuleName, fmt.Sprint(s.SingleAddon), s.SecretName, s.AddonName,
+	})
+	sum := sha256.Sum256(fields)
+	return hex.EncodeToString(sum[:])[:syncSpecHashLen]
 }
 
 // isCommitSHA reports whether ref is a full 40-character lowercase hex commit id.
@@ -425,6 +447,7 @@ func buildSyncJob(addon *odoov1.OdooAddon, spec syncSpec, opts syncJobOptions) *
 				labelManagedBy:  managedByOperator,
 				labelAddonOwner: addon.Name,
 			},
+			Annotations: map[string]string{annotationSyncSpecHash: syncSpecHash(spec)},
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            ptrTo(syncBackoffLimit),

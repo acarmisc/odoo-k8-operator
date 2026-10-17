@@ -105,6 +105,10 @@ spec:
               lastSyncTime:
                 format: date-time
                 type: string
+              message:
+                description: Message explains the current phase, e.g. why the last
+                  sync failed.
+                type: string
               phase:
                 type: string
               ready:

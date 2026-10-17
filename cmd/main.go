@@ -85,6 +85,10 @@ func main() {
 	var enableWebhooks bool
 	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
 		"Enable admission webhooks (requires TLS certs — use with cert-manager)")
+	var addonMaxConcurrentReconciles int
+	flag.IntVar(&addonMaxConcurrentReconciles, "addon-max-concurrent-reconciles", 4,
+		"Maximum number of OdooAddon reconciles run in parallel. Addon syncs are non-blocking, "+
+			"so raising this lets many addons sync at once. Values below 1 mean 1.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -219,9 +223,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.OdooAddonReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		Clientset: clientset,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		Clientset:               clientset,
+		MaxConcurrentReconciles: addonMaxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OdooAddon")
 		os.Exit(1)

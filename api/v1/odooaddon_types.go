@@ -56,6 +56,8 @@ type OdooAddonStatus struct {
 	Phase        string       `json:"phase,omitempty"`
 	ClonedCommit string       `json:"clonedCommit,omitempty"`
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
+	// Message explains the current phase, e.g. why the last sync failed.
+	Message string `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true

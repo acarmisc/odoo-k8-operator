@@ -121,14 +121,25 @@ kubectl -n odoo create rolebinding odoo-operator \
 
 Check the ClusterRole name first with `kubectl get clusterrole | grep manager-role`. The name is prefixed by the kustomize `namePrefix`.
 
-> **Known issue: cluster-wide cache, not verified on a cluster.** `cmd/main.go` creates the manager without a namespace restriction, so the informers list and watch OdooInstance, OdooAddon, OdooUpgrade, Secret and the other kinds across **all namespaces**. A namespaced RoleBinding does not grant cluster-scoped list and watch. Read from the code, the default install (RoleBinding in the operator namespace only) may therefore fail to start its controllers. The end-to-end test only checks that the manager pod runs, so it does not catch this.
->
-> Options, none of which has been tested here:
->
-> 1. Bind `manager-role` with a ClusterRoleBinding. This grants cluster-wide access, including read access to all Secrets. This is the trade-off the role comment warns about.
-> 2. Restrict the manager's cache to the namespaces you manage. That is a code change in `cmd/main.go` (controller-runtime cache options). It is not in this repository's current version.
->
-> Check the manager log after deploy. Lines that contain `forbidden` or `failed to wait for caches to sync` point to this issue.
+### Which namespaces the operator watches
+
+The manager only watches the namespaces listed in `--watch-namespaces` (comma separated), whose default is the environment variable `WATCH_NAMESPACES`. The default manifest sets that variable to the operator's own namespace (from the downward API), which matches the default RoleBinding: the operator can read and write only where it has been granted access, and its cache never asks for cluster-wide permissions.
+
+To manage OdooInstances in another namespace you need **both**:
+
+1. a RoleBinding in that namespace (the `kubectl create rolebinding` command above), and
+2. the namespace in `WATCH_NAMESPACES`, for example:
+
+   ```bash
+   kubectl -n odoo-k8-operator-system set env deployment/odoo-k8-operator-controller-manager \
+     WATCH_NAMESPACES=odoo-k8-operator-system,odoo
+   ```
+
+   In a kustomize overlay, patch the `manager` container `env` instead (a later `make deploy` resets a manual change).
+
+If you prefer cluster-wide operation, bind `manager-role` with a ClusterRoleBinding and remove the flag (empty means all namespaces). This gives the operator read access to Secrets in every namespace, which is the trade-off the role comment warns about.
+
+If a namespace is missing from either place the objects there are ignored (no RoleBinding: the log shows `forbidden`; not in `WATCH_NAMESPACES`: nothing happens). Check the manager log after changing it.
 
 ### Permissions and why
 
@@ -161,6 +172,7 @@ The flags are defined in `cmd/main.go`. The default manifests set `--leader-elec
 | `--enable-webhooks` | `false` | unset | Register the OdooAddon admission webhook. |
 | `--webhook-cert-path`, `--webhook-cert-name`, `--webhook-cert-key` | `""`, `tls.crt`, `tls.key` | unset | Webhook certificate directory and file names. |
 | `--enable-http2` | `false` | unset | HTTP/2 is off by default because of known HTTP/2 CVEs. |
+| `--watch-namespaces` | `$WATCH_NAMESPACES`, empty = all namespaces | unset (the env var below is used) | Namespaces to watch and manage. Must match the RoleBindings you created. |
 | `--addon-max-concurrent-reconciles` | `4` | unset (`4`) | How many OdooAddons reconcile at once. Values below 1 mean 1. |
 | `--zap-*` | controller-runtime defaults | unset | Log format and level. |
 
@@ -168,6 +180,7 @@ Environment variables read by the manager:
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `WATCH_NAMESPACES` | operator namespace in the default manifest | Default of `--watch-namespaces`. Comma-separated list; empty means all namespaces (needs a ClusterRoleBinding). |
 | `OPERATOR_SYNC_IMAGE` | `alpine/git:2.47.2` | Image for every sync Job. Read once at start-up. Restart the manager after changing it. |
 
 Example: raise the addon concurrency:

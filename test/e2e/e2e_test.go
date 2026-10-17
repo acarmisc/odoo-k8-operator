@@ -19,6 +19,7 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -115,6 +116,48 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
 			}).Should(Succeed())
+		})
+
+		It("should start all controllers and reconcile an OdooInstance", func() {
+			By("waiting for the three controllers to start their workers")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+				logs, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(logs).NotTo(ContainSubstring("forbidden"), "RBAC problem: operator is not allowed to watch")
+				for _, name := range []string{"odooinstance", "odooaddon", "odooupgrade"} {
+					g.Expect(logs).To(MatchRegexp(`Starting workers.*`+name), "controller %s did not start", name)
+				}
+			}).Should(Succeed())
+
+			By("creating an OdooInstance in the operator namespace")
+			manifest := fmt.Sprintf(`apiVersion: odoo.operator.io/v1
+kind: OdooInstance
+metadata:
+  name: e2e-odoo
+  namespace: %s
+spec:
+  image: odoo:19.0
+  replicas: 1
+`, namespace)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create OdooInstance")
+
+			By("checking that the operator created the Deployment, Service and ConfigMap")
+			for _, resource := range []string{"deployment/e2e-odoo", "service/e2e-odoo", "configmap/e2e-odoo-config"} {
+				Eventually(func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", resource, "-n", namespace)
+					_, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred(), "%s not created", resource)
+				}).Should(Succeed())
+			}
+
+			By("deleting the OdooInstance")
+			cmd = exec.Command("kubectl", "delete", "odooinstance", "e2e-odoo", "-n", namespace, "--wait=true")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 })

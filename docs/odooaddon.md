@@ -10,6 +10,7 @@ An `OdooAddon` points at a Git repository that holds Odoo modules. The operator 
 - [Public and private repositories](#public-and-private-repositories)
 - [Branches, tags and commit SHAs](#branches-tags-and-commit-shas)
 - [Single-module and multi-module repositories](#single-module-and-multi-module-repositories)
+- [Module removal, updates and conflicts](#module-removal-updates-and-conflicts)
 - [Sync lifecycle and phases](#sync-lifecycle-and-phases)
 - [Status](#status)
 - [Resources and security of the sync Job](#resources-and-security-of-the-sync-job)
@@ -152,7 +153,7 @@ If no subfolder contains `__manifest__.py`, the sync fails with `no Odoo modules
 
 ### Single-module (`singleAddon: true`)
 
-The whole repository is the module. Its root folder becomes `moduleName` in the addons volume. `addonPath` is ignored in this mode. The operator does not check for `__manifest__.py` in this mode, so an error is found only when Odoo loads the module.
+The whole repository is the module. Its root folder becomes `moduleName` in the addons volume. `addonPath` is ignored in this mode. The operator does not check for `__manifest__.py` in this mode, so an error is found only when Odoo loads the module. The module name reported in `status.modules` is `moduleName`.
 
 ```text
 geox-theme/              <- gitUrl (repository root is the module)
@@ -202,6 +203,21 @@ Adding or removing a ready OdooAddon for an instance also changes the revision a
 
 Without `spec.upgrade`, the operator does not run `odoo -u`. The new code runs against the existing database. Module data and views are not updated until you run an upgrade yourself, see [upgrades.md](upgrades.md#manual-upgrade).
 
+## Module removal, updates and conflicts
+
+Each sync publishes modules as symlinks (`/mnt/odoo/addons/<module>` pointing into `/mnt/odoo/addons/.releases/<addon>/<sha>/<module>`) and records the list of modules in `.releases/<addon>/.modules`. This gives three guarantees:
+
+- **Modules removed upstream disappear.** In a multi-module repository, a module that is no longer in the repository has its link removed on the next successful sync. Only links that point into this addon's own releases are removed.
+- **Conflicts are detected before anything changes.** If another OdooAddon already provides a module with the same name, the sync fails with `module <name> is already provided by addon <other>` (see `status.message`). The check runs for all modules first, so a conflict leaves the volume untouched.
+- **Deleting an OdooAddon cleans up.** The finalizer runs a short cleanup Job (`<addon>-cleanup`) that removes this addon's module links and its release directories. If the instance or its addons volume no longer exists, or the cleanup does not finish within about 3 minutes, the finalizer is removed anyway, so deletion never gets stuck.
+
+Notes:
+
+- Removing a module's files does not uninstall it from the Odoo database. Uninstall the module in Odoo first if you no longer want it; otherwise Odoo logs errors for an installed module that is missing on disk.
+- The cleanup Job is started right after the sync Job is deleted in the background; in a narrow window a sync pod may still be finishing.
+- The empty `.releases/` parent directory stays on the volume.
+- Addons pinned to a commit that were synced by an older operator version are synced once more after the upgrade so that they report their modules.
+
 ## Status
 
 | Field | Meaning |
@@ -209,6 +225,7 @@ Without `spec.upgrade`, the operator does not run `odoo -u`. The new code runs a
 | `status.phase` | `Pending`, `Syncing`, `Synced` or `Failed`. |
 | `status.ready` | `true` only in `Synced`. |
 | `status.clonedCommit` | Commit SHA of the last successful sync. |
+| `status.modules` | Module names published by the last successful sync. The OdooInstance uses them for `status.addonPaths`. |
 | `status.lastSyncTime` | When the last sync ended, successful or not. |
 | `status.message` | Reason for `Failed`. For a failed Job it is the Job's failure reason, then `--- last log lines ---` and up to about 2000 bytes of the log. |
 

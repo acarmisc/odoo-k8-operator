@@ -33,6 +33,9 @@ var blockedConfigKeys = map[string]bool{
 	"dbfilter":     true,
 }
 
+// defaultPostgresPort is used when spec.postgres.port is unset.
+const defaultPostgresPort int32 = 5432
+
 // odooConfDefaults returns production defaults that spec.config may override.
 func odooConfDefaults() map[string]string {
 	return map[string]string{
@@ -68,9 +71,13 @@ func renderOdooConf(spec *odoov1.OdooInstanceSpec) (string, error) {
 	}
 
 	if spec.Postgres.Database != "" {
+		dbPort := spec.Postgres.Port
+		if dbPort == 0 {
+			dbPort = defaultPostgresPort
+		}
 		dbSettings := []confPair{
 			{"db_host", spec.Postgres.Host},
-			{"db_port", strconv.Itoa(int(spec.Postgres.Port))},
+			{"db_port", strconv.Itoa(int(dbPort))},
 			{"db_name", spec.Postgres.Database},
 			{"db_user", spec.Postgres.User},
 			{"db_sslmode", sslModeRequire},

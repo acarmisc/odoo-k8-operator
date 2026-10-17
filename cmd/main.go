@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -31,6 +32,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -82,6 +84,12 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	var watchNamespaces string
+	flag.StringVar(&watchNamespaces, "watch-namespaces", os.Getenv("WATCH_NAMESPACES"),
+		"Comma-separated namespaces the operator watches and manages (default: $WATCH_NAMESPACES). "+
+			"Empty means all namespaces, "+
+			"which requires cluster-wide list/watch permissions (ClusterRoleBinding). With the default "+
+			"per-namespace RoleBindings set this to the namespaces that have a RoleBinding.")
 	var enableWebhooks bool
 	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
 		"Enable admission webhooks (requires TLS certs — use with cert-manager)")
@@ -186,8 +194,18 @@ func main() {
 		})
 	}
 
+	cacheOpts := cache.Options{}
+	if namespaces := splitNamespaces(watchNamespaces); len(namespaces) > 0 {
+		setupLog.Info("restricting watches to namespaces", "namespaces", namespaces)
+		cacheOpts.DefaultNamespaces = make(map[string]cache.Config, len(namespaces))
+		for _, ns := range namespaces {
+			cacheOpts.DefaultNamespaces[ns] = cache.Config{}
+		}
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
+		Cache:                  cacheOpts,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -277,4 +295,19 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// splitNamespaces parses the --watch-namespaces value, ignoring blanks and duplicates.
+func splitNamespaces(v string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, ns := range strings.Split(v, ",") {
+		ns = strings.TrimSpace(ns)
+		if ns == "" || seen[ns] {
+			continue
+		}
+		seen[ns] = true
+		out = append(out, ns)
+	}
+	return out
 }

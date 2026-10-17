@@ -126,6 +126,23 @@ func TestRenderOdooConf(t *testing.T) {
 			},
 		},
 		{
+			name: "unset postgres port defaults to 5432",
+			spec: odoov1.OdooInstanceSpec{Postgres: odoov1.PostgresSpec{
+				Host: testPGHost, Database: testPGDatabase, User: testPGUser,
+			}},
+			want: []string{
+				testLinePrefix,
+				lineAddonsPath,
+				"db_host = db.internal",
+				"db_name = odoo",
+				"db_port = 5432",
+				"db_sslmode = require",
+				"db_user = odoo_user",
+				lineListDBFalse,
+				lineProxyTrue,
+			},
+		},
+		{
 			name:    "admin_passwd is blocked",
 			spec:    odoov1.OdooInstanceSpec{Config: map[string]string{"admin_passwd": "secret"}},
 			wantErr: errNotPermitted,

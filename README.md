@@ -39,13 +39,15 @@ make deploy IMG=ghcr.io/acarmisc/odoo-k8-operator:<tag>
 kubectl -n odoo-k8-operator-system get pods
 ```
 
-**3. Create a namespace for Odoo and let the operator manage it.** The default RBAC is bound in the operator namespace only. Bind it in your namespace too. See [installation.md](docs/installation.md#namespaces-and-rbac) for the known RBAC issue that applies to this step.
+**3. Create a namespace for Odoo and let the operator manage it.** The operator watches only the namespaces it was granted: bind its role in your namespace **and** add the namespace to `WATCH_NAMESPACES` (see [installation.md](docs/installation.md#namespaces-and-rbac)).
 
 ```bash
 kubectl create namespace odoo
 kubectl -n odoo create rolebinding odoo-operator \
   --clusterrole=odoo-k8-operator-manager-role \
   --serviceaccount=odoo-k8-operator-system:odoo-k8-operator-controller-manager
+kubectl -n odoo-k8-operator-system set env deployment/odoo-k8-operator-controller-manager \
+  WATCH_NAMESPACES=odoo-k8-operator-system,odoo
 ```
 
 **4. Create the Secrets.** Each one holds one key, `password`.

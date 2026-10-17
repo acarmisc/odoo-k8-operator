@@ -51,7 +51,7 @@ spec:
 | `dataVolume.accessMode` | `ReadWriteOnce` or `ReadWriteMany` | `ReadWriteOnce` | Access mode of the filestore PVC. |
 | `dataVolume.retainOnDelete` | bool | `true` | Keep the filestore PVC when the OdooInstance is deleted. See [installation.md](installation.md#uninstalling). |
 | `postgres.host` | string | none | PostgreSQL host. Rendered as `db_host` when `postgres.database` is set. |
-| `postgres.port` | int32 | none | PostgreSQL port, 1 to 65535. Set it: when `postgres.database` is set and this is unset, `db_port` is rendered as `0`. |
+| `postgres.port` | int32 | `5432` (rendered when unset) | PostgreSQL port, 1 to 65535. |
 | `postgres.database` | string | none | Database name. When set, the operator renders the `db_*` options and sets `db_sslmode = require`. |
 | `postgres.user` | string | none | Database user, rendered as `db_user`. |
 | `postgres.passwordSecret` | string | none | Name of a Secret in the same namespace. Key `password` is injected as `PGPASSWORD` and `DB_PASSWORD`. |

@@ -39,6 +39,22 @@ type OdooInstanceSpec struct {
 	// (database manager) password. It is injected as an environment variable and
 	// passed to Odoo via --admin-passwd, never written to the ConfigMap.
 	AdminPasswordSecret string `json:"adminPasswordSecret,omitempty"`
+	// Upgrade makes the operator run `odoo -u <modules>` (via an OdooUpgrade) whenever the
+	// set of synced addon commits changes, and only roll the pods out once it succeeded.
+	Upgrade *UpgradeSpec `json:"upgrade,omitempty"`
+}
+
+// UpgradeSpec configures automatic module upgrades for an OdooInstance.
+type UpgradeSpec struct {
+	// Modules to update with -u after addon commits change. Use ["all"] for every module.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=100
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_]+$`
+	Modules []string `json:"modules"`
+	// TimeoutSeconds for each generated OdooUpgrade. Defaults to 1800.
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=86400
+	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
 }
 
 type AddonVolumeSpec struct {
@@ -81,6 +97,11 @@ type OdooInstanceStatus struct {
 	Phase              string   `json:"phase,omitempty"`
 	AddonPaths         []string `json:"addonPaths,omitempty"`
 	ObservedGeneration int64    `json:"observedGeneration,omitempty"`
+	// AppliedAddonsHash is the addons hash the running pods were rolled out with. With
+	// spec.upgrade set it only advances after the matching OdooUpgrade succeeded.
+	AppliedAddonsHash string `json:"appliedAddonsHash,omitempty"`
+	// ActiveUpgrade names the OdooUpgrade currently gating a rollout, if any.
+	ActiveUpgrade string `json:"activeUpgrade,omitempty"`
 }
 
 // +kubebuilder:object:root=true

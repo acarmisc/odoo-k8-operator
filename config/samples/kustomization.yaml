@@ -2,4 +2,5 @@
 resources:
 - odoo_v1_odooinstance.yaml
 - odoo_v1_odooaddon.yaml
+- odoo_v1_odooupgrade.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

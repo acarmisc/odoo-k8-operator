@@ -226,6 +226,14 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "OdooAddon")
 		os.Exit(1)
 	}
+	if err := (&controller.OdooUpgradeReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Clientset: clientset,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "OdooUpgrade")
+		os.Exit(1)
+	}
 	if enableWebhooks {
 		if err := (&odoov1.OdooAddonValidator{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "OdooAddon")

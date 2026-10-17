@@ -35,3 +35,6 @@ rules:
 - apiGroups: ["odoo.operator.io"]
   resources: ["odooaddons", "odooaddons/status", "odooaddons/finalizers"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["odoo.operator.io"]
+  resources: ["odooupgrades", "odooupgrades/status", "odooupgrades/finalizers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

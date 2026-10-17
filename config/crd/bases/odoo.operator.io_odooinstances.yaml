@@ -184,6 +184,30 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              upgrade:
+                description: |-
+                  Upgrade makes the operator run `odoo -u <modules>` (via an OdooUpgrade) whenever the
+                  set of synced addon commits changes, and only roll the pods out once it succeeded.
+                properties:
+                  modules:
+                    description: Modules to update with -u after addon commits change.
+                      Use ["all"] for every module.
+                    items:
+                      pattern: ^[a-zA-Z0-9_]+$
+                      type: string
+                    maxItems: 100
+                    minItems: 1
+                    type: array
+                  timeoutSeconds:
+                    description: TimeoutSeconds for each generated OdooUpgrade. Defaults
+                      to 1800.
+                    format: int64
+                    maximum: 86400
+                    minimum: 60
+                    type: integer
+                required:
+                - modules
+                type: object
               version:
                 type: string
             type: object
@@ -199,10 +223,19 @@ spec:
                 == ''ReadWriteMany'')'
           status:
             properties:
+              activeUpgrade:
+                description: ActiveUpgrade names the OdooUpgrade currently gating
+                  a rollout, if any.
+                type: string
               addonPaths:
                 items:
                   type: string
                 type: array
+              appliedAddonsHash:
+                description: |-
+                  AppliedAddonsHash is the addons hash the running pods were rolled out with. With
+                  spec.upgrade set it only advances after the matching OdooUpgrade succeeded.
+                type: string
               observedGeneration:
                 format: int64
                 type: integer

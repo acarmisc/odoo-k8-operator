@@ -196,6 +196,29 @@ func instanceConditions(f instanceCondFacts) []metav1.Condition {
 	}
 }
 
+// cronCondition maps the cron Deployment to CronReady. It is True once the cron pod is ready,
+// False with CronNotReady while a cron pod exists but is not ready, and False with CronPending
+// before any cron pod exists. CronReady does not affect the instance Ready condition.
+func cronCondition(cron cronOutcome) metav1.Condition {
+	switch {
+	case !cron.deployFound:
+		return newCondition(odoov1.ConditionTypeCronReady, condFalse, odoov1.ReasonCronPending,
+			"cron Deployment not created yet")
+	case cron.replicas == 0 && cron.held:
+		return newCondition(odoov1.ConditionTypeCronReady, condFalse, odoov1.ReasonCronPending,
+			"no cron pod yet; pods stay at 0 replicas while the database is initialised")
+	case cron.replicas == 0:
+		return newCondition(odoov1.ConditionTypeCronReady, condFalse, odoov1.ReasonCronPending,
+			"no cron pod yet; with ReadWriteOnce volumes it starts once a web pod runs on the same node")
+	case cron.ready < 1:
+		return newCondition(odoov1.ConditionTypeCronReady, condFalse, odoov1.ReasonCronNotReady,
+			fmt.Sprintf("cron pod not ready: %d/%d replicas ready", cron.ready, cron.replicas))
+	default:
+		return newCondition(odoov1.ConditionTypeCronReady, condTrue, odoov1.ReasonCronRunning,
+			"cron pod ready")
+	}
+}
+
 // instanceSummary is status.message: the Degraded message while degraded, otherwise the
 // Ready message while not ready, otherwise empty.
 func instanceSummary(conds []metav1.Condition) string {

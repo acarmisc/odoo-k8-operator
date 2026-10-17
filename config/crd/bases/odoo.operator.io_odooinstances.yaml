@@ -75,6 +75,85 @@ spec:
                 additionalProperties:
                   type: string
                 type: object
+              cron:
+                description: |-
+                  Cron moves the scheduled actions out of the web pods into a dedicated Deployment
+                  named <name>-cron. Unset or disabled, every pod runs cron as before.
+                properties:
+                  enabled:
+                    description: Enabled creates the cron Deployment and turns cron
+                      off in the web pods.
+                    type: boolean
+                  maxCronThreads:
+                    description: |-
+                      MaxCronThreads is the number of cron workers of the cron pod (--max-cron-threads).
+                      Defaults to 2.
+                    format: int32
+                    maximum: 16
+                    minimum: 1
+                    type: integer
+                  resources:
+                    description: |-
+                      Resources of the cron pod. When unset, the web resources (spec.resources) or the
+                      defaults apply.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                type: object
               dataVolume:
                 description: |-
                   DataVolumeSpec configures persistent storage for Odoo's data_dir
@@ -279,8 +358,9 @@ spec:
                   spec.upgrade set it only advances after the matching OdooUpgrade succeeded.
                 type: string
               conditions:
-                description: Conditions hold Ready, Progressing and Degraded. The
-                  reasons are listed in docs/odooinstance.md.
+                description: |-
+                  Conditions hold Ready, Progressing and Degraded, and CronReady when spec.cron is enabled.
+                  The reasons are listed in docs/odooinstance.md.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

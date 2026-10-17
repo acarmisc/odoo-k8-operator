@@ -136,7 +136,8 @@ The install path has not been run against a live Odoo in CI. The tests use envte
 - With `replicas > 1` the operator creates a PodDisruptionBudget with `maxUnavailable: 1`. A node drain then evicts at most one Odoo pod at a time.
 - Rolling updates use `maxSurge: 1` and `maxUnavailable: 0`, so the old pods keep serving until the new ones are ready.
 - The operator has no fields for node selectors, affinity, tolerations or topology spread. Use cluster-level policies if you need them.
-- **Cron jobs run in every pod.** There is only one Deployment, so each pod runs the same configuration. Odoo's scheduled actions run in each pod's cron workers. Read Odoo's documentation on `max_cron_threads` and decide how to limit them before you scale out. The operator does not create a separate cron Deployment.
+- **Cron jobs.** Without `spec.cron`, every pod runs Odoo's scheduled actions in its cron workers, so each web replica multiplies them. Set `spec.cron.enabled: true` before you scale out. The web pods then run no cron workers, and one `<name>-cron` pod runs the scheduled actions. See [odooinstance.md](odooinstance.md#dedicated-cron-pod).
+- **Recommended layout for more than one web pod:** `replicas` with `ReadWriteMany` volumes, `cron.enabled: true`, and `cron.maxCronThreads` sized for your scheduled actions. Point the Ingress at the web Service. The cron pod has no Service.
 
 ## Resources
 
@@ -320,7 +321,6 @@ These come from reading the code and from [audit-2026-10.md](audit-2026-10.md), 
 
 **Networking and workloads**
 
-- One Deployment for web and cron. No separate worker Deployment.
 - No Ingress, Gateway API or Route is created. Expose the Service yourself.
 - No HorizontalPodAutoscaler.
 - Odoo's `workers` and similar settings are not set by the operator. Set them in `spec.config`.

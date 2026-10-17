@@ -58,9 +58,12 @@ Only the pods carry the `app` and `instance` labels. The Service, the ConfigMap 
 |---|---|
 | Operator | `kubectl -n odoo-k8-operator-system logs deploy/odoo-k8-operator-controller-manager --tail=200` |
 | Odoo pods | `kubectl -n odoo logs deploy/shop --tail=200` (use `-l app=odoo,instance=shop` for all pods) |
+| Cron pod (only with `spec.cron.enabled`) | `kubectl -n odoo logs deploy/shop-cron --tail=200` (the scheduled actions only; no HTTP access log) |
 | Sync Job (only while it exists) | `kubectl -n odoo logs job/shop-modules-sync` |
 | Sync pod (while the Job exists) | `kubectl -n odoo get pods -l odoo.operator.io/addon=shop-modules` |
 | Upgrade Job | `kubectl -n odoo logs job/<upgrade-name>-run` (kept for 24 hours after it ends) |
+
+The cron pod is `shop-cron`. If `CronReady` is `False` with reason `CronPending`, it has no node yet. With `ReadWriteOnce` volumes it waits for a web pod on the same node, so check that the web pods run: `kubectl -n odoo get pods -l app=odoo,instance=shop`.
 
 The operator deletes sync Jobs after they succeed or fail. For a failed sync, the reason and the log tail are in `status.message`. Use that rather than the Job.
 

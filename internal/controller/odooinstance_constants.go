@@ -53,8 +53,11 @@ const (
 	confKeyAddonsPath = "addons_path"
 	confKeyProxyMode  = "proxy_mode"
 	confKeyListDB     = "list_db"
-	valueTrue         = "True"
-	valueFalse        = "False"
+	// confKeyMaxCronThreads is forced to 0 in the web pods while spec.cron is enabled.
+	confKeyMaxCronThreads = "max_cron_threads"
+	valueNoCronThreads    = "0"
+	valueTrue             = "True"
+	valueFalse            = "False"
 
 	suffixConfigMap   = "-config"
 	suffixAddonsPVC   = "-addons"

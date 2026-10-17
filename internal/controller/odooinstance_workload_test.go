@@ -100,12 +100,12 @@ func TestDesiredReplicas(t *testing.T) {
 
 func TestBuildOdooArgs(t *testing.T) {
 	plain := &odoov1.OdooInstance{}
-	if got := buildOdooArgs(plain); !reflect.DeepEqual(got, []string{"--config", odooConfPath}) {
+	if got := buildOdooArgs(plain); !reflect.DeepEqual(got, []string{upgradeFlagConfig, odooConfPath}) {
 		t.Errorf("buildOdooArgs() without admin secret = %v", got)
 	}
 
 	withAdmin := &odoov1.OdooInstance{Spec: odoov1.OdooInstanceSpec{AdminPasswordSecret: testAdminSecret}}
-	want := []string{"--config", odooConfPath, "--admin-passwd=$(ODOO_ADMIN_PASSWD)"}
+	want := []string{upgradeFlagConfig, odooConfPath, "--admin-passwd=$(ODOO_ADMIN_PASSWD)"}
 	if got := buildOdooArgs(withAdmin); !reflect.DeepEqual(got, want) {
 		t.Errorf("buildOdooArgs() with admin secret = %v, want %v", got, want)
 	}

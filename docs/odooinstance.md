@@ -1,6 +1,6 @@
 # OdooInstance reference
 
-An `OdooInstance` describes one Odoo deployment: the image, the PostgreSQL database, the storage, the `odoo.conf` settings and the resources. The operator turns it into a Deployment, a Service, a ConfigMap, two PVCs and (for more than one replica) a PodDisruptionBudget. This page lists every field, the defaults the code applies, the status fields and the generated objects.
+An `OdooInstance` describes one Odoo deployment: the image, the PostgreSQL database, the storage, the `odoo.conf` settings and the resources. The operator turns it into a Deployment, a Service, a ConfigMap, two PVCs, (for more than one replica) a PodDisruptionBudget and, with `spec.cron`, a separate cron Deployment. This page lists every field, the defaults the code applies, the status fields and the generated objects.
 
 All fields are under `spec` unless noted. Field names are the JSON names used in the CRD.
 
@@ -12,6 +12,7 @@ All fields are under `spec` unless noted. Field names are the JSON names used in
 - [spec.config rules](#specconfig-rules)
 - [Generated odoo.conf](#generated-odooconf)
 - [Status](#status)
+- [Dedicated cron pod](#dedicated-cron-pod)
 - [Generated objects](#generated-objects)
 - [Pod details](#pod-details)
 - [Production example](#production-example)
@@ -66,6 +67,10 @@ spec:
 | `initialize.adminUserPasswordSecret` | string | required | Secret in the same namespace, key `password`. Its value becomes the password of the Odoo user `admin`. |
 | `initialize.withDemo` | bool | `false` | Load demo data. `false` passes `--without-demo=all`. |
 | `initialize.timeoutSeconds` | int64 | `1800` | Deadline for the initialisation Job. Min 60, max 86400. |
+| `cron` | object | none | Runs the scheduled actions in one dedicated pod. See [Dedicated cron pod](#dedicated-cron-pod). |
+| `cron.enabled` | bool | `false` | Creates the Deployment `<name>-cron` and renders `max_cron_threads = 0` into the web pods' `odoo.conf`. |
+| `cron.maxCronThreads` | int32 | `2` | Cron workers of the cron pod (`--max-cron-threads`). Min 1, max 16. |
+| `cron.resources` | ResourceRequirements | `resources` | Resources of the cron pod. Unset means the web `resources`, or the defaults. |
 
 ### Resources default
 
@@ -144,6 +149,8 @@ proxy_mode = True
 workers = 4
 ```
 
+With `spec.cron.enabled: true` the operator also writes `max_cron_threads = 0`, which the web pods need to serve HTTP without cron workers. A `max_cron_threads` key in `spec.config` is rejected while cron is enabled (`InvalidConfig`).
+
 The hash of this file is a pod-template annotation. Any change to it rolls the pods (see [architecture.md](architecture.md#rollouts)).
 
 ## Status
@@ -158,7 +165,7 @@ The hash of this file is a pod-template annotation. Any change to it rolls the p
 | `status.initialized` | bool | `true` once `spec.initialize` succeeded, or was skipped because the Deployment already had ready pods. |
 | `status.initUpgrade` | string | Name of the initialisation OdooUpgrade (`<name>-init`) while it runs or after it failed. |
 | `status.observedGeneration` | int64 | Generation the operator last reconciled. |
-| `status.conditions` | list | `Ready`, `Progressing` and `Degraded`. See below. |
+| `status.conditions` | list | `Ready`, `Progressing` and `Degraded`, plus `CronReady` while `spec.cron.enabled` is set. See below. |
 | `status.message` | string | Summary of the state: the `Degraded` message while degraded, otherwise the `Ready` message while not ready. |
 
 Phases:
@@ -183,6 +190,8 @@ Conditions use the usual Kubernetes shape: `type`, `status`, `reason`, `message`
 | `Progressing` | `False` | `Reconciled`, `UpgradeFailed`, `InitializationFailed`, `ReconcileError`. |
 | `Degraded` | `False` | `AsExpected`. |
 | `Degraded` | `True` | `MissingSecret`, `InvalidConfig`, `ReconcileError`, `UpgradeFailed`, `InitializationFailed`. |
+| `CronReady` | `True` | `CronRunning`: the cron pod is ready. Present only while `spec.cron.enabled` is set. |
+| `CronReady` | `False` | `CronPending`: no cron pod yet (not created, held during initialisation, or waiting for a web pod on the same node). `CronNotReady`: the cron pod exists but is not ready. |
 
 `MissingSecret` names a Secret that does not exist. `InvalidConfig` is a bad `spec.config` key or value, or a bad size. The `ReconcileFailed` Event carries the same message. For the commands, see [operations.md](operations.md#read-the-state).
 
@@ -218,6 +227,35 @@ Rules and limits:
 - An instance whose Deployment already has ready pods and no `<name>-init` OdooUpgrade is treated as initialised. Nothing is run, and a `Warning` Event `InitializationSkipped` says so. This guards a live database against a second `-i`.
 - The initialisation has not been run against a real Odoo in CI. The tests use envtest (a real API server, no Odoo). Check the first Job log on your own cluster.
 
+## Dedicated cron pod
+
+Odoo runs its scheduled actions (cron) in the worker threads of every pod with `max_cron_threads` above 0. With several web pods, each one would run the same jobs. With `spec.cron.enabled: true` the operator moves them to one pod:
+
+- The web pods get `max_cron_threads = 0` in `odoo.conf`, so they serve HTTP only.
+- The Deployment `<name>-cron` runs one pod with `--no-http --max-cron-threads=<n>`. It has no ports, no Service and no HTTP probes. Its strategy is `Recreate`, so two cron pods never run at once.
+- The cron pod has the same image, environment, volumes, security context and rollout hashes as the web pods. It rolls with them, follows the addons revision the upgrade gate allows, and stays at zero replicas during `spec.initialize`.
+- Its pod labels are `app: odoo-cron`, `instance: <name>` and `app.kubernetes.io/component: cron`. The web Service and PodDisruptionBudget select `app: odoo`, so they never select a cron pod. The Deployment selector cannot be changed after creation.
+- When the data or addons volume is not `ReadWriteMany`, the cron pod has a required pod affinity to a web pod on the same node (`kubernetes.io/hostname`). It stays `Pending` until a web pod runs on that node. The web pods have no affinity to the cron pod, so a later web rollout can land on another node. There the web pod waits for the volume (a Multi-Attach error) until the cron pod is deleted or rescheduled. Use `ReadWriteMany` volumes to avoid this.
+- Disable it with `enabled: false` or by removing `spec.cron`. The operator deletes `<name>-cron` and removes the override, so the web pods roll and run cron again.
+
+```yaml
+apiVersion: odoo.operator.io/v1
+kind: OdooInstance
+metadata:
+  name: shop
+spec:
+  replicas: 3
+  addonsVolume:
+    accessMode: ReadWriteMany
+  dataVolume:
+    accessMode: ReadWriteMany
+  cron:
+    enabled: true
+    maxCronThreads: 4
+```
+
+`CronReady` (see [Status](#status)) reports whether the cron pod runs. It does not change `Ready`, which follows the web pods only.
+
 ## Generated objects
 
 Names use the OdooInstance name `<name>`:
@@ -225,6 +263,7 @@ Names use the OdooInstance name `<name>`:
 | Object | Name | Notes |
 |---|---|---|
 | Deployment | `<name>` | Owned by the instance. |
+| Deployment | `<name>-cron` | Only while `spec.cron.enabled`. Owned by the instance. One replica, no Service. See [Dedicated cron pod](#dedicated-cron-pod). |
 | Service | `<name>` | ClusterIP, ports `8069` (odoo) and `8072` (longpolling). |
 | ConfigMap | `<name>-config` | Key `odoo.conf`. Owned by the instance. |
 | PVC | `<name>-addons` | Owned by the instance, always. Deleted with the instance. |
@@ -246,6 +285,8 @@ Pod labels:
 | `app.kubernetes.io/managed-by` | `odoo-k8-operator` |
 
 The Deployment selector uses only `app` and `instance`. Do not rely on other labels for selection.
+
+The cron pods of `spec.cron` carry `app: odoo-cron` and `app.kubernetes.io/component: cron` instead of `app: odoo`.
 
 ## Pod details
 

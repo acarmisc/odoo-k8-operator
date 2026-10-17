@@ -46,6 +46,25 @@ type OdooInstanceSpec struct {
 	// OdooUpgrade named <name>-init, before any pod is started. The Deployment stays at zero
 	// replicas until that succeeds. It is set at creation time only.
 	Initialize *InitializeSpec `json:"initialize,omitempty"`
+	// Cron moves the scheduled actions out of the web pods into a dedicated Deployment
+	// named <name>-cron. Unset or disabled, every pod runs cron as before.
+	Cron *CronSpec `json:"cron,omitempty"`
+}
+
+// CronSpec describes the dedicated cron Deployment of an OdooInstance. When enabled, the web
+// pods are rendered with max_cron_threads = 0 and a single "<name>-cron" pod runs the
+// scheduled actions, so scaling the web replicas does not multiply cron workers.
+type CronSpec struct {
+	// Enabled creates the cron Deployment and turns cron off in the web pods.
+	Enabled bool `json:"enabled,omitempty"`
+	// MaxCronThreads is the number of cron workers of the cron pod (--max-cron-threads).
+	// Defaults to 2.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=16
+	MaxCronThreads *int32 `json:"maxCronThreads,omitempty"`
+	// Resources of the cron pod. When unset, the web resources (spec.resources) or the
+	// defaults apply.
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // InitializeSpec describes the one-time database initialisation of an OdooInstance:
@@ -123,7 +142,8 @@ type OdooInstanceStatus struct {
 	Phase              string   `json:"phase,omitempty"`
 	AddonPaths         []string `json:"addonPaths,omitempty"`
 	ObservedGeneration int64    `json:"observedGeneration,omitempty"`
-	// Conditions hold Ready, Progressing and Degraded. The reasons are listed in docs/odooinstance.md.
+	// Conditions hold Ready, Progressing and Degraded, and CronReady when spec.cron is enabled.
+	// The reasons are listed in docs/odooinstance.md.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

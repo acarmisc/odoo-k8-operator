@@ -70,6 +70,16 @@ func renderOdooConf(spec *odoov1.OdooInstanceSpec) (string, error) {
 		merged[key] = value
 	}
 
+	// With spec.cron enabled the web pods run no cron workers; the cron pod runs them. The
+	// key is owned by the operator, so a user value would silently change which pods run cron.
+	if spec.Cron != nil && spec.Cron.Enabled {
+		if _, set := spec.Config[confKeyMaxCronThreads]; set {
+			return "", fmt.Errorf("config key %q cannot be set in spec.config while spec.cron.enabled is true; "+
+				"the cron Deployment sets the cron workers through spec.cron.maxCronThreads", confKeyMaxCronThreads)
+		}
+		merged[confKeyMaxCronThreads] = valueNoCronThreads
+	}
+
 	if spec.Postgres.Database != "" {
 		dbPort := spec.Postgres.Port
 		if dbPort == 0 {

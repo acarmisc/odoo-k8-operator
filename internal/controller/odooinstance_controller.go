@@ -166,6 +166,10 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 	if err := r.reconcileService(ctx, instance); err != nil {
 		return ctrl.Result{}, err
 	}
+	cron, err := r.reconcileCron(ctx, instance, hashes, initDec.pending)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Derive addonPaths from Synced OdooAddon objects; avoids a cross-controller status write race.
 	instance.Status.AddonPaths = addonMountPaths(addons)
@@ -207,6 +211,9 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		result.RequeueAfter = initFailedRequeue
 	}
 
+	// CronReady is informational: Ready and Degraded above describe the web pods only.
+	applyCronCondition(&instance.Status.Conditions, instance.Generation, cron)
+
 	setConditions(&instance.Status.Conditions, instance.Generation, instanceConditions(instanceCondFacts{
 		Phase:           instance.Status.Phase,
 		DeploymentFound: deployFound,
@@ -223,6 +230,7 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		return result, err
 	}
 	evs := append(instanceEvents(*before, instance.Status, gate.succeededUpgrade), initEvents(initDec)...)
+	evs = append(evs, cron.events...)
 	emitEvents(r.Recorder, instance, evs)
 	return result, nil
 }

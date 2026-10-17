@@ -83,7 +83,7 @@ func deploymentStrategy(replicas int32, dataAccessMode corev1.PersistentVolumeAc
 
 func buildOdooArgs(instance *odoov1.OdooInstance) []string {
 	// PGPASSWORD env var handles database auth via libpq; no --db-password arg.
-	args := []string{"--config", odooConfPath}
+	args := []string{upgradeFlagConfig, odooConfPath}
 	if instance.Spec.AdminPasswordSecret != "" {
 		// Kubernetes expands $(VAR) from the container env, so the password
 		// never appears in the pod spec or the ConfigMap.
@@ -180,102 +180,131 @@ func configMapName(instanceName string) string {
 	return instanceName + suffixConfigMap
 }
 
-// buildPodTemplate renders the full pod template. Labels, annotations and the
+// podAnnotations are the rollout hashes stamped on every pod template of the instance. The
+// web and cron pods carry the same values, so they roll together.
+func podAnnotations(hashes rolloutHashes) map[string]string {
+	return map[string]string{
+		annotationConfigHash:  hashes.config,
+		annotationSecretsHash: hashes.secrets,
+		annotationAddonsHash:  hashes.addons,
+	}
+}
+
+func odooPodSecurityContext() *corev1.PodSecurityContext {
+	return &corev1.PodSecurityContext{
+		RunAsNonRoot: boolPtr(true),
+		RunAsUser:    int64Ptr(odooUID),
+		FSGroup:      int64Ptr(odooUID),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+}
+
+func odooContainerSecurityContext() *corev1.SecurityContext {
+	readOnly := true
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: boolPtr(false),
+		ReadOnlyRootFilesystem:   &readOnly,
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+}
+
+// odooVolumeMounts are the mounts of the Odoo container, web and cron alike.
+func odooVolumeMounts() []corev1.VolumeMount {
+	return []corev1.VolumeMount{
+		{Name: volumeConfig, MountPath: mountPathConfig, ReadOnly: true},
+		{Name: volumeAddons, MountPath: addonsMountPath, ReadOnly: true},
+		{Name: volumeData, MountPath: mountPathData},
+		{Name: volumeTmp, MountPath: mountPathTmp},
+	}
+}
+
+// odooVolumes are the pod volumes of the instance, web and cron alike.
+func odooVolumes(instanceName string) []corev1.Volume {
+	return []corev1.Volume{
+		{
+			Name: volumeConfig,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: configMapName(instanceName)},
+					DefaultMode:          int32Ptr(0o644),
+				},
+			},
+		},
+		{
+			Name: volumeAddons,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: addonsPVCName(instanceName),
+					ReadOnly:  true,
+				},
+			},
+		},
+		{
+			Name: volumeData,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: dataPVCName(instanceName),
+				},
+			},
+		},
+		{
+			// Odoo needs a writable /tmp because the root filesystem is read-only.
+			Name: volumeTmp,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+	}
+}
+
+// odooPodSpec is the pod spec shared by the web and cron pods. Only the container and the
+// affinity differ between them.
+func odooPodSpec(instance *odoov1.OdooInstance, container corev1.Container, affinity *corev1.Affinity) corev1.PodSpec {
+	container.Image = odooImage(&instance.Spec)
+	container.Env = buildOdooEnv(&instance.Spec)
+	container.VolumeMounts = odooVolumeMounts()
+	container.SecurityContext = odooContainerSecurityContext()
+	container.TerminationMessagePath = corev1.TerminationMessagePathDefault
+	container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	return corev1.PodSpec{
+		AutomountServiceAccountToken:  boolPtr(false),
+		TerminationGracePeriodSeconds: int64Ptr(terminationGraceSecs),
+		RestartPolicy:                 corev1.RestartPolicyAlways,
+		DNSPolicy:                     corev1.DNSClusterFirst,
+		SchedulerName:                 corev1.DefaultSchedulerName,
+		SecurityContext:               odooPodSecurityContext(),
+		Affinity:                      affinity,
+		Containers:                    []corev1.Container{container},
+		Volumes:                       odooVolumes(instance.Name),
+	}
+}
+
+// buildPodTemplate renders the full web pod template. Labels, annotations and the
 // security posture are all set here so the Deployment is fully described by
 // the instance spec and the rollout hashes.
 func buildPodTemplate(instance *odoov1.OdooInstance, hashes rolloutHashes) corev1.PodTemplateSpec {
 	startup, readiness, liveness := odooProbes()
-	readOnly := true
-
+	container := corev1.Container{
+		Name:      appOdoo,
+		Args:      buildOdooArgs(instance),
+		Resources: odooResources(&instance.Spec),
+		Ports: []corev1.ContainerPort{
+			{Name: portNameOdoo, ContainerPort: portOdoo, Protocol: corev1.ProtocolTCP},
+			{Name: portNameLongpolling, ContainerPort: portLongpolling, Protocol: corev1.ProtocolTCP},
+		},
+		StartupProbe:   startup,
+		ReadinessProbe: readiness,
+		LivenessProbe:  liveness,
+	}
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels: podLabels(instance.Name),
-			Annotations: map[string]string{
-				annotationConfigHash:  hashes.config,
-				annotationSecretsHash: hashes.secrets,
-				annotationAddonsHash:  hashes.addons,
-			},
+			Labels:      podLabels(instance.Name),
+			Annotations: podAnnotations(hashes),
 		},
-		Spec: corev1.PodSpec{
-			AutomountServiceAccountToken:  boolPtr(false),
-			TerminationGracePeriodSeconds: int64Ptr(terminationGraceSecs),
-			RestartPolicy:                 corev1.RestartPolicyAlways,
-			DNSPolicy:                     corev1.DNSClusterFirst,
-			SchedulerName:                 corev1.DefaultSchedulerName,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: boolPtr(true),
-				RunAsUser:    int64Ptr(odooUID),
-				FSGroup:      int64Ptr(odooUID),
-				SeccompProfile: &corev1.SeccompProfile{
-					Type: corev1.SeccompProfileTypeRuntimeDefault,
-				},
-			},
-			Containers: []corev1.Container{
-				{
-					Name:      appOdoo,
-					Image:     odooImage(&instance.Spec),
-					Args:      buildOdooArgs(instance),
-					Env:       buildOdooEnv(&instance.Spec),
-					Resources: odooResources(&instance.Spec),
-					Ports: []corev1.ContainerPort{
-						{Name: portNameOdoo, ContainerPort: portOdoo, Protocol: corev1.ProtocolTCP},
-						{Name: portNameLongpolling, ContainerPort: portLongpolling, Protocol: corev1.ProtocolTCP},
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: volumeConfig, MountPath: mountPathConfig, ReadOnly: true},
-						{Name: volumeAddons, MountPath: addonsMountPath, ReadOnly: true},
-						{Name: volumeData, MountPath: mountPathData},
-						{Name: volumeTmp, MountPath: mountPathTmp},
-					},
-					StartupProbe:   startup,
-					ReadinessProbe: readiness,
-					LivenessProbe:  liveness,
-					SecurityContext: &corev1.SecurityContext{
-						AllowPrivilegeEscalation: boolPtr(false),
-						ReadOnlyRootFilesystem:   &readOnly,
-						Capabilities: &corev1.Capabilities{
-							Drop: []corev1.Capability{"ALL"},
-						},
-					},
-					TerminationMessagePath:   corev1.TerminationMessagePathDefault,
-					TerminationMessagePolicy: corev1.TerminationMessageReadFile,
-				},
-			},
-			Volumes: []corev1.Volume{
-				{
-					Name: volumeConfig,
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: configMapName(instance.Name)},
-							DefaultMode:          int32Ptr(0o644),
-						},
-					},
-				},
-				{
-					Name: volumeAddons,
-					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: addonsPVCName(instance.Name),
-							ReadOnly:  true,
-						},
-					},
-				},
-				{
-					Name: volumeData,
-					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: dataPVCName(instance.Name),
-						},
-					},
-				},
-				{
-					// Odoo needs a writable /tmp because the root filesystem is read-only.
-					Name: volumeTmp,
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
-					},
-				},
-			},
-		},
+		Spec: odooPodSpec(instance, container, nil),
 	}
 }

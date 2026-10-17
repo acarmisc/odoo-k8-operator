@@ -61,7 +61,10 @@ Names use `<name>` for the OdooInstance name. The full table, with labels and re
 | PVC addons (always owned) | `<name>-addons` | OdooInstance |
 | PVC filestore (owned only if `retainOnDelete: false`) | `<name>-data` | OdooInstance or none |
 | PodDisruptionBudget (`replicas > 1`) | `<name>` | OdooInstance |
+| Deployment for cron (`spec.cron.enabled`) | `<name>-cron` | OdooInstance |
 | OdooUpgrade (gate) | `<name>-upg-<hash8>` | OdooInstance |
+
+With `spec.cron.enabled`, the web Deployment runs no cron workers and `<name>-cron` runs the scheduled actions in one pod. It has no Service. See [odooinstance.md](odooinstance.md#dedicated-cron-pod).
 
 Each OdooAddon has its own sync Job, `<addon>-sync`, owned by the OdooAddon. Each OdooUpgrade has its own Job, `<name>-run`, owned by the OdooUpgrade.
 

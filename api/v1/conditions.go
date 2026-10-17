@@ -17,8 +17,8 @@ limitations under the License.
 package v1
 
 // Condition types written to status.conditions. Each kind uses the subset it needs:
-// OdooInstance and OdooAddon use Ready, Progressing and Degraded; OdooUpgrade uses
-// Succeeded and Progressing.
+// OdooInstance and OdooAddon use Ready, Progressing and Degraded; OdooUpgrade and
+// OdooBackup use Succeeded and Progressing (OdooBackup also Degraded for a rejected CronJob).
 const (
 	// ConditionTypeReady is True when the object serves or is synced, and False otherwise.
 	ConditionTypeReady = "Ready"
@@ -62,4 +62,8 @@ const (
 	ReasonRunning   = "Running"
 	ReasonComplete  = "Complete"
 	ReasonJobFailed = "JobFailed"
+
+	// Reasons used by OdooBackup.
+	ReasonScheduled       = "Scheduled"
+	ReasonCronJobRejected = "CronJobRejected"
 )

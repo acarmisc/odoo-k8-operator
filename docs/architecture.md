@@ -1,6 +1,6 @@
 # Architecture
 
-The operator is one Go controller-runtime manager with three controllers: OdooInstance, OdooAddon and OdooUpgrade. The controllers never run Git or Odoo themselves. They create Kubernetes Jobs and Deployments, and act on what those objects report. This page explains the moving parts, the reconcile flow of each controller, the addons volume, and how pods are rolled.
+The operator is one Go controller-runtime manager with four controllers: OdooInstance, OdooAddon, OdooUpgrade and OdooBackup. The controllers never run Git or Odoo themselves. They create Kubernetes Jobs and Deployments, and act on what those objects report. This page explains the moving parts, the reconcile flow of each controller, the addons volume, and how pods are rolled.
 
 ## Contents
 
@@ -9,6 +9,7 @@ The operator is one Go controller-runtime manager with three controllers: OdooIn
 - [OdooInstance reconcile](#odooinstance-reconcile)
 - [OdooAddon reconcile and sync](#odooaddon-reconcile-and-sync)
 - [OdooUpgrade reconcile](#odooupgrade-reconcile)
+- [OdooBackup reconcile](#odoobackup-reconcile)
 - [Addons volume layout](#addons-volume-layout)
 - [Rollouts](#rollouts)
 - [Upgrade gate](#upgrade-gate)
@@ -22,15 +23,18 @@ flowchart LR
         IC["OdooInstance controller"]
         AC["OdooAddon controller"]
         UC["OdooUpgrade controller"]
+        BC["OdooBackup controller"]
     end
     IC -->|"creates"| DEP["Deployment, Service, ConfigMap, PVCs, PDB"]
     IC -->|"creates when spec.upgrade gates a rollout"| UPG["OdooUpgrade"]
     AC -->|"creates"| SJ["sync Job"]
     UC -->|"creates"| UJ["upgrade Job"]
+    BC -->|"creates"| BJ["backup Job or CronJob"]
     SJ -->|"writes releases and symlinks"| ADDV[("addons PVC")]
     DEP --> PODS["Odoo pods"]
     PODS -->|"read-only"| ADDV
     UJ -->|"read-only"| ADDV
+    BJ -->|"read-only data"| PODS
     PODS --> PG[("PostgreSQL")]
     UJ --> PG
 ```
@@ -41,6 +45,7 @@ flowchart LR
 | Odoo pods | Deployment `<instance>` | Run Odoo with the generated `odoo.conf`. |
 | Sync Job | Job `<addon>-sync` | Clones or fetches one repository and publishes its modules to the addons volume. |
 | Upgrade Job | Job `<upgrade>-run` | Runs `odoo -u/-i ... --stop-after-init` against one database. |
+| Backup Job | Job `<backup>-run`, or CronJob `<backup>-sched` | Dumps one database with `pg_dump` and archives the filestore, to a PVC or S3. See [backups.md](backups.md). |
 
 The manager image is built from `Dockerfile` and runs as UID 65532 on a distroless base. It contains no `git` binary. Git runs only inside sync Jobs.
 
@@ -126,6 +131,19 @@ Monitoring the Job:
 - `Failed`: the Job has a Failed condition, or a failed pod. Set `Failed` with the reason and the log tail.
 - Job missing: after a 30-second grace period, set `Failed` (`upgrade Job ... no longer exists`).
 
+## OdooBackup reconcile
+
+1. Read the OdooBackup. A one-shot backup stops if it is `Succeeded` or `Failed`. A scheduled one always continues.
+2. A one-shot backup that is `Running` with a Job name is monitored (below).
+3. Validate the spec. An invalid spec sets `Failed`.
+4. Read the OdooInstance. If it is missing, set `Pending` and wait.
+5. One-shot only: list the OdooBackups of the same instance. If another is `Running`, or an older one is `Pending`, set `Pending` and wait. Scheduled backups are not queued.
+6. Create the Job `<name>-run` (adopting an existing one) and set `Running`.
+
+A scheduled backup creates or updates the CronJob `<name>-sched` when its spec hash changes, and sets `Scheduled`. The CronJob is owned by the OdooBackup. If the API server rejects it, the backup is `Failed` with reason `CronJobRejected`.
+
+Monitoring the Job follows the same rules as OdooUpgrade. On success the result line `backup: <files>` from the pod log is stored in `status.lastBackup`.
+
 ## Addons volume layout
 
 ```text
@@ -191,4 +209,5 @@ Leader election is off in the binary (`--leader-elect` defaults to `false`), and
 - [odooinstance.md](odooinstance.md): fields and generated objects.
 - [odooaddon.md](odooaddon.md): sync options and phases.
 - [upgrades.md](upgrades.md): upgrade Jobs and the gate.
+- [backups.md](backups.md): database and filestore backups, retention and restore.
 - [development.md](development.md): where the code for each part lives.

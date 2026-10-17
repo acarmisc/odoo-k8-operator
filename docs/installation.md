@@ -33,7 +33,7 @@ This page covers what you need before you install, how to install the CRDs and t
 make install
 ```
 
-This runs `make manifests` and applies `config/crd` (three CRDs: `odooinstances`, `odooaddons`, `odooupgrades`, group `odoo.operator.io`, version `v1`). Without `make`:
+This runs `make manifests` and applies `config/crd` (four CRDs: `odooinstances`, `odooaddons`, `odooupgrades`, `odoobackups`, group `odoo.operator.io`, version `v1`). Without `make`:
 
 ```bash
 kubectl apply -k config/crd
@@ -151,7 +151,8 @@ If a namespace is missing from either place the objects there are ignored (no Ro
 | core | `secrets` | get, list, watch | Hash the Secrets an instance references, and re-reconcile the instance when one changes. The list and watch are needed by the cached client. |
 | apps | `deployments` | full | Odoo Deployments. |
 | policy | `poddisruptionbudgets` | full | PDB when `replicas > 1`. |
-| batch | `jobs` | full | Sync Jobs and upgrade Jobs. The operator deletes sync Jobs when they finish. |
+| batch | `jobs` | full | Sync Jobs, upgrade Jobs and backup Jobs. The operator deletes sync Jobs when they finish. |
+| batch | `cronjobs` | full | CronJobs of scheduled OdooBackups. Created, updated when the spec changes, and deleted with the backup. |
 | events.k8s.io | `events` | create, patch | Emit Events on transitions (sync, upgrade, rollout, errors). |
 | odoo.operator.io | the three CRDs, their `/status` and `/finalizers` | full | Reconcile and status writes, and finalizers. |
 
@@ -183,6 +184,8 @@ Environment variables read by the manager:
 |---|---|---|
 | `WATCH_NAMESPACES` | operator namespace in the default manifest | Default of `--watch-namespaces`. Comma-separated list; empty means all namespaces (needs a ClusterRoleBinding). |
 | `OPERATOR_SYNC_IMAGE` | `alpine/git:2.47.2` | Image for every sync Job. Read once at start-up. Restart the manager after changing it. |
+| `OPERATOR_BACKUP_IMAGE` | `postgres:17-alpine` | Image for the `pg_dump` step of every backup. See [backups.md](backups.md#configuration). |
+| `OPERATOR_S3_IMAGE` | `amazon/aws-cli:2.27.50` | Image for the S3 upload step of backups to S3. See [backups.md](backups.md#configuration). |
 
 Example: raise the addon concurrency:
 
@@ -232,7 +235,7 @@ There is one API version (`v1`), so there is no conversion webhook.
 
    ```bash
    kubectl -n odoo-k8-operator-system rollout status deploy/odoo-k8-operator-controller-manager
-   kubectl get odooinstances,odooaddons,odooupgrades -A
+   kubectl get odooinstances,odooaddons,odooupgrades,odoobackups -A
    ```
 
 The controllers keep no state of their own. Restarting the manager does not lose progress. Jobs and status are the state. The rollout of the manager does not restart Odoo pods.

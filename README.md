@@ -139,6 +139,7 @@ Then open <http://localhost:8069>.
 | `OdooInstance` | none | One Odoo deployment: image, database, storage, `odoo.conf` settings, resources. Owns the Deployment, Service, ConfigMap, PVCs and PDB. |
 | `OdooAddon` | none | A Git repository of modules, synced into one OdooInstance's addons volume. Has phases `Pending`, `Syncing`, `Synced`, `Failed`. |
 | `OdooUpgrade` | none | A one-shot `odoo -u` or `-i` run against an instance's database. Created by hand or by `spec.upgrade`. Has phases `Pending`, `Running`, `Succeeded`, `Failed`. |
+| `OdooBackup` | none | A `pg_dump` of an instance's database plus its filestore, to a PVC or S3, one-shot or on a cron schedule. Has phases `Pending`, `Running`, `Succeeded`, `Failed`, `Scheduled`. |
 
 Use the full kind names with `kubectl`, for example `kubectl get odooinstance`.
 
@@ -153,7 +154,7 @@ Before you run real users on an instance, check these. Each item links to the de
 - [ ] **Network.** Add a NetworkPolicy for each instance. The operator does not create one. ([production-guide](docs/production-guide.md#security))
 - [ ] **Resources.** Set `resources` explicitly. The defaults are small for Odoo with several workers. ([odooinstance](docs/odooinstance.md#resources-default))
 - [ ] **Monitoring.** Scrape the operator, and alert on instances that are not ready and addons in `Failed`. ([production-guide](docs/production-guide.md#monitoring))
-- [ ] **Backups.** The operator does not back up the database or the filestore. Set up backups and test a restore. ([production-guide](docs/production-guide.md#backups))
+- [ ] **Backups.** Create an `OdooBackup` (one-shot or scheduled) and test a restore. ([backups](docs/backups.md))
 
 ## Documentation
 
@@ -164,6 +165,7 @@ Before you run real users on an instance, check these. Each item links to the de
 | [docs/odooinstance.md](docs/odooinstance.md) | You write an OdooInstance, or need a field's default, validation or the generated objects. |
 | [docs/odooaddon.md](docs/odooaddon.md) | You add code from Git: credentials, pinning, single or multi-module repos. |
 | [docs/upgrades.md](docs/upgrades.md) | You run module upgrades, automatically or by hand. |
+| [docs/backups.md](docs/backups.md) | You back up a database and filestore, or restore one. |
 | [docs/architecture.md](docs/architecture.md) | You want to know how the controllers, Jobs and volumes fit together. |
 | [docs/production-guide.md](docs/production-guide.md) | You prepare an instance for production, or plan a version upgrade. |
 | [docs/operations.md](docs/operations.md) | Something is stuck or failed, and you need a runbook. |

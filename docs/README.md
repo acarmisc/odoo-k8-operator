@@ -10,6 +10,7 @@ This is the documentation for the Odoo Kubernetes Operator. Start with the [main
 | [odooinstance.md](odooinstance.md) | Reference for `OdooInstance`: every field with its default and validation, the generated `odoo.conf`, status and phases, the generated objects, probes, volumes and security context. |
 | [odooaddon.md](odooaddon.md) | Reference for `OdooAddon`: Git URLs and credentials, branch, tag or SHA pinning, single and multi-module repositories, the sync lifecycle and phases. |
 | [upgrades.md](upgrades.md) | `OdooUpgrade` in detail, manual upgrades, automatic upgrades with `spec.upgrade` and the rollout gate, retries and limitations. |
+| [backups.md](backups.md) | `OdooBackup`: database and filestore backups to a PVC or S3, scheduled backups, retention, the restore runbook and limits. |
 | [architecture.md](architecture.md) | The controllers and the Jobs they create, the reconcile flows, the addons volume layout, how pods are rolled, and the upgrade gate, with diagrams. |
 | [production-guide.md](production-guide.md) | Storage, secrets, database, scaling, resources, security, monitoring, backups, multi-instance layouts, a version-upgrade runbook and known limitations. |
 | [operations.md](operations.md) | Day-2 runbooks with `kubectl`: reading state, logs, stuck or failed addons and upgrades, forcing a re-sync, and a table of common error messages. |

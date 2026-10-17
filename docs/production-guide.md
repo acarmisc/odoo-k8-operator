@@ -1,6 +1,6 @@
 # Production guide
 
-This guide lists what to decide and check before you run Odoo on this operator for real users. It covers storage, secrets, scaling, resources, security, monitoring and backups, then the multi-instance layout, an upgrade runbook and the known limitations. The operator covers the Kubernetes objects. It does not cover your database, your backups or your network policy. Those are your job.
+This guide lists what to decide and check before you run Odoo on this operator for real users. It covers storage, secrets, scaling, resources, security, monitoring and backups, then the multi-instance layout, an upgrade runbook and the known limitations. The operator covers the Kubernetes objects. It runs backups with `OdooBackup`, but it does not cover your database server, the retention of your backup storage, or your network policy. Those are your job.
 
 ## Contents
 
@@ -26,7 +26,7 @@ This guide lists what to decide and check before you run Odoo on this operator f
 - [ ] Upgrades: decide whether `spec.upgrade` gates rollouts, and test it. ([upgrades.md](upgrades.md))
 - [ ] Network: add a NetworkPolicy per instance. The operator does not create one. ([Security](#security))
 - [ ] Monitoring: scrape the operator, alert on not-ready instances and failed addons. ([Monitoring](#monitoring))
-- [ ] Backups: back up the database and the filestore, and test a restore. ([Backups](#backups))
+- [ ] Backups: create an `OdooBackup` for the database and the filestore, and test a restore. ([Backups](#backups))
 
 ## Storage
 
@@ -152,17 +152,36 @@ The operator's own namespace is labelled `restricted` in the end-to-end test.
 
 ## Backups
 
-**The operator does not back up anything.** It does not back up the PostgreSQL database, the filestore (`<name>-data`) or the addons volume. The addons are in Git, so they can be restored from the commit SHA. The database and the filestore must be backed up by you.
+The operator backs up the database and the filestore with the `OdooBackup` resource. It runs `pg_dump` and archives `/var/lib/odoo/filestore/<database>`, and writes the files to a PersistentVolumeClaim or to an S3-compatible bucket. One-shot and scheduled (cron) backups are both supported, with retention. The full reference, including the restore runbook and the limits, is in [backups.md](backups.md).
 
-Recommended approach:
+A minimal scheduled backup to S3-compatible storage:
 
-- **Database.** Use your PostgreSQL operator's backup feature (for example CloudNativePG with a Barman object store), or a scheduled `pg_dump`:
+```yaml
+apiVersion: odoo.operator.io/v1
+kind: OdooBackup
+metadata:
+  name: shop-nightly
+  namespace: odoo
+spec:
+  instanceRef:
+    name: shop
+  schedule: "0 2 * * *"
+  destination:
+    s3:
+      bucket: odoo-backups
+      prefix: shop
+      endpoint: https://minio.example.internal:9000
+      forcePathStyle: true
+      credentialsSecret: backup-s3
+  retention: 14
+```
 
-  ```bash
-  PGPASSWORD="$DB_PASSWORD" pg_dump -h pg-rw.databases.svc.cluster.local -U odoo -Fc -f /backup/shop.dump shop
-  ```
+The addons are not backed up. They come from Git, so they can be restored from the commit SHA.
 
-- **Filestore.** Take a VolumeSnapshot of `<name>-data` with a snapshot class that supports your StorageClass:
+Points to decide before go-live:
+
+- **Consistency.** The dump and the filestore archive are taken one after the other. Writes in between can make them disagree. Schedule backups in a quiet window, or stop the instance for a consistent pair. See [backups.md](backups.md#requirements-and-limits).
+- **Volume snapshots** are a complement, not a replacement. A VolumeSnapshot of `<name>-data` is fast and covers the whole filestore. Take it with a snapshot class that supports your StorageClass, and combine it with a database dump taken in the same window:
 
   ```yaml
   apiVersion: snapshot.storage.k8s.io/v1
@@ -176,8 +195,8 @@ Recommended approach:
       persistentVolumeClaimName: shop-data
   ```
 
-- **Consistency.** A database backup and a filestore snapshot taken minutes apart can disagree. Take them in the same window, and test a restore of both together.
-- **Test restores.** An untested backup is not a backup. Restore to a second namespace on a schedule.
+- **Credentials and access.** Creating an OdooBackup lets its creator read the instance's database through the operator. Give that permission only where database access is intended.
+- **Test restores.** An untested backup is not a backup. Restore to a second namespace on a schedule. The restore steps are in [backups.md](backups.md#restore-runbook).
 
 ## Multi-instance layout
 

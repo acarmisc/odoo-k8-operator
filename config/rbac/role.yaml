@@ -15,6 +15,10 @@ rules:
 - apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
+- apiGroups: ["events.k8s.io"]
+  # The event recorder (mgr.GetEventRecorder) creates Events and patches repeated ones.
+  resources: ["events"]
+  verbs: ["create", "patch"]
 - apiGroups: [""]
   resources: ["secrets"]
   # list/watch are required because the cached client reads Secrets to hash them

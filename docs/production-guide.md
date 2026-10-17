@@ -255,7 +255,6 @@ These come from reading the code and from [audit-2026-10.md](audit-2026-10.md), 
 
 **Status and visibility**
 
-- The OdooInstance status has only `phase`, `ready` and a few hash fields. There is no `conditions` list and no `message`. Some errors appear only in the operator log. See [operations.md](operations.md#instance-is-not-ready).
 - Fields that the API accepts but the operator does not use: `spec.version`, `spec.edition` (OdooInstance) and `spec.readOnly` (OdooAddon).
 
 **Git**

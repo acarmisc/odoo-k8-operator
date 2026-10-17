@@ -97,6 +97,15 @@ type OdooInstanceStatus struct {
 	Phase              string   `json:"phase,omitempty"`
 	AddonPaths         []string `json:"addonPaths,omitempty"`
 	ObservedGeneration int64    `json:"observedGeneration,omitempty"`
+	// Conditions hold Ready, Progressing and Degraded. The reasons are listed in docs/odooinstance.md.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +patchStrategy=merge
+	// +patchMergeKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// Message is a human summary of the current state, e.g. the reason for Degraded.
+	Message string `json:"message,omitempty"`
 	// AppliedAddonsHash is the addons hash the running pods were rolled out with. With
 	// spec.upgrade set it only advances after the matching OdooUpgrade succeeded.
 	AppliedAddonsHash string `json:"appliedAddonsHash,omitempty"`

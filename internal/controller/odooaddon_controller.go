@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
@@ -83,6 +84,8 @@ type OdooAddonReconciler struct {
 	// MaxConcurrentReconciles is how many OdooAddons reconcile in parallel; <= 0 means 1.
 	// The reconciler keeps no mutable state of its own, so concurrent addons are safe.
 	MaxConcurrentReconciles int
+	// Recorder emits Events on status transitions. Nil disables events.
+	Recorder events.EventRecorder
 }
 
 func (r *OdooAddonReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -116,17 +119,18 @@ func (r *OdooAddonReconciler) reconcileOdooAddon(ctx context.Context, addon *odo
 	instanceName := addon.Spec.InstanceRef.Name
 	instanceNamespace := addon.Namespace
 	if addon.Spec.InstanceRef.Namespace != "" && addon.Spec.InstanceRef.Namespace != addon.Namespace {
-		return r.markFailed(ctx, addon, "cross-namespace instanceRef is not supported")
+		return r.markFailed(ctx, addon, odoov1.ReasonInvalidSpec, "cross-namespace instanceRef is not supported")
 	}
 
 	if instanceName == "" {
-		return r.pending(ctx, addon)
+		return r.pending(ctx, addon, odoov1.ReasonInstanceNotFound, "spec.instanceRef.name is empty")
 	}
 
 	instance := &odoov1.OdooInstance{}
 	if err := r.Get(ctx, types.NamespacedName{Name: instanceName, Namespace: instanceNamespace}, instance); err != nil {
 		if apierrors.IsNotFound(err) {
-			return r.pending(ctx, addon)
+			return r.pending(ctx, addon, odoov1.ReasonInstanceNotFound,
+				fmt.Sprintf("OdooInstance %q not found in namespace %q", instanceName, instanceNamespace))
 		}
 		return ctrl.Result{}, err
 	}
@@ -137,7 +141,8 @@ func (r *OdooAddonReconciler) reconcileOdooAddon(ctx context.Context, addon *odo
 		return ctrl.Result{}, err
 	}
 	if !pvcReady {
-		return r.pending(ctx, addon)
+		return r.pending(ctx, addon, odoov1.ReasonVolumeNotBound,
+			fmt.Sprintf("addons PVC %q is not Bound yet", pvcName))
 	}
 
 	return r.syncAddon(ctx, addon, instance, pvcName)
@@ -179,7 +184,11 @@ func (r *OdooAddonReconciler) syncAddon(ctx context.Context, addon *odoov1.OdooA
 				return ctrl.Result{}, err
 			}
 		}
-		return r.markFailed(ctx, addon, decision.Message)
+		reason := odoov1.ReasonInvalidSpec
+		if decision.Action == addonActionJobConflict {
+			reason = odoov1.ReasonJobConflict
+		}
+		return r.markFailed(ctx, addon, reason, decision.Message)
 
 	case addonActionDeleteStaleJob:
 		if err := r.deleteJob(ctx, job); err != nil {
@@ -216,11 +225,11 @@ func (r *OdooAddonReconciler) syncAddon(ctx context.Context, addon *odoov1.OdooA
 func (r *OdooAddonReconciler) recordSyncSuccess(ctx context.Context, addon *odoov1.OdooAddon, job *batchv1.Job) (ctrl.Result, error) {
 	commit, modules, err := r.readSyncOutput(ctx, job)
 	if err != nil {
-		return r.finishFailedSyncJob(ctx, addon, job, err.Error())
+		return r.finishFailedSyncJob(ctx, addon, job, odoov1.ReasonSyncFailed, err.Error())
 	}
 
 	now := metav1.Now()
-	if err := r.writeAddonStatus(ctx, addon, func(s *odoov1.OdooAddonStatus) {
+	if err := r.writeAddonStatus(ctx, addon, "", "", func(s *odoov1.OdooAddonStatus) {
 		s.Phase = phaseSynced
 		s.Ready = true
 		s.ClonedCommit = commit
@@ -237,17 +246,21 @@ func (r *OdooAddonReconciler) recordSyncSuccess(ctx context.Context, addon *odoo
 }
 
 // recordSyncFailure stores the Job's failure reason with a log excerpt, then retires the Job.
+// The log decides the condition reason: a module clash is reported as ModuleConflict.
 func (r *OdooAddonReconciler) recordSyncFailure(ctx context.Context, addon *odoov1.OdooAddon, job *batchv1.Job) (ctrl.Result, error) {
 	msg := jobFailureReason(job)
-	if tail := r.jobLogTail(ctx, job); tail != "" {
-		msg += addonMsgLogHeader + tail
+	logs, err := r.readJobLogs(ctx, job)
+	if err == nil {
+		if tail := upgradeTail(logs, addonLogTailBytes); tail != "" {
+			msg += addonMsgLogHeader + tail
+		}
 	}
-	return r.finishFailedSyncJob(ctx, addon, job, msg)
+	return r.finishFailedSyncJob(ctx, addon, job, addonFailureReason(logs), msg)
 }
 
-func (r *OdooAddonReconciler) finishFailedSyncJob(ctx context.Context, addon *odoov1.OdooAddon, job *batchv1.Job, msg string) (ctrl.Result, error) {
+func (r *OdooAddonReconciler) finishFailedSyncJob(ctx context.Context, addon *odoov1.OdooAddon, job *batchv1.Job, reason, msg string) (ctrl.Result, error) {
 	now := metav1.Now()
-	if err := r.writeAddonStatus(ctx, addon, func(s *odoov1.OdooAddonStatus) {
+	if err := r.writeAddonStatus(ctx, addon, reason, msg, func(s *odoov1.OdooAddonStatus) {
 		s.Phase = phaseFailed
 		s.Ready = false
 		s.Message = msg
@@ -261,12 +274,13 @@ func (r *OdooAddonReconciler) finishFailedSyncJob(ctx context.Context, addon *od
 	return ctrl.Result{RequeueAfter: failureBackoff}, nil
 }
 
-// markFailed records a Failed phase with msg and retries after failureBackoff. LastSyncTime
-// is set only if it was empty, so the cooldown gate still measures from the first failure.
-func (r *OdooAddonReconciler) markFailed(ctx context.Context, addon *odoov1.OdooAddon, msg string) (ctrl.Result, error) {
+// markFailed records a Failed phase with reason and msg and retries after failureBackoff.
+// LastSyncTime is set only if it was empty, so the cooldown gate still measures from the
+// first failure.
+func (r *OdooAddonReconciler) markFailed(ctx context.Context, addon *odoov1.OdooAddon, reason, msg string) (ctrl.Result, error) {
 	addonLogger.Info("OdooAddon sync failed", "addon", addon.Name, "reason", msg)
 	now := metav1.Now()
-	if err := r.writeAddonStatus(ctx, addon, func(s *odoov1.OdooAddonStatus) {
+	if err := r.writeAddonStatus(ctx, addon, reason, msg, func(s *odoov1.OdooAddonStatus) {
 		s.Phase = phaseFailed
 		s.Ready = false
 		s.Message = msg
@@ -279,9 +293,10 @@ func (r *OdooAddonReconciler) markFailed(ctx context.Context, addon *odoov1.Odoo
 	return ctrl.Result{RequeueAfter: failureBackoff}, nil
 }
 
-// pending parks an addon whose instance or addons volume is not ready yet.
-func (r *OdooAddonReconciler) pending(ctx context.Context, addon *odoov1.OdooAddon) (ctrl.Result, error) {
-	if err := r.writeAddonStatus(ctx, addon, func(s *odoov1.OdooAddonStatus) {
+// pending parks an addon whose instance or addons volume is not ready yet. reason and msg
+// only feed the conditions; the status message is left as it was.
+func (r *OdooAddonReconciler) pending(ctx context.Context, addon *odoov1.OdooAddon, reason, msg string) (ctrl.Result, error) {
+	if err := r.writeAddonStatus(ctx, addon, reason, msg, func(s *odoov1.OdooAddonStatus) {
 		s.Phase = phasePending
 		s.Ready = false
 	}); err != nil {
@@ -290,27 +305,43 @@ func (r *OdooAddonReconciler) pending(ctx context.Context, addon *odoov1.OdooAdd
 	return ctrl.Result{RequeueAfter: pendingRequeue}, nil
 }
 
-// setPhase writes a Syncing phase; an empty phase leaves the status alone.
+// setPhase writes a Syncing phase when phase is set. It always runs the condition update,
+// so an addon whose status predates conditions gets them on its next pass; the write is
+// skipped when nothing changed.
 func (r *OdooAddonReconciler) setPhase(ctx context.Context, addon *odoov1.OdooAddon, phase string) error {
+	reason, msg := "", ""
 	if phase == "" {
-		return nil
+		// Keeping the phase keeps the reason it was given (for example ModuleConflict).
+		reason, msg = keptReasonMessage(addon.Status.Conditions)
 	}
-	return r.writeAddonStatus(ctx, addon, func(s *odoov1.OdooAddonStatus) {
+	return r.writeAddonStatus(ctx, addon, reason, msg, func(s *odoov1.OdooAddonStatus) {
+		if phase == "" {
+			return
+		}
 		s.Phase = phase
 		s.Message = ""
 	})
 }
 
-// writeAddonStatus applies mutate to the addon status and writes it only when something
-// changed. Writing an unchanged status would still wake this reconciler through the
-// OdooAddon watch, so skipping no-op writes keeps the loop quiet.
-func (r *OdooAddonReconciler) writeAddonStatus(ctx context.Context, addon *odoov1.OdooAddon, mutate func(*odoov1.OdooAddonStatus)) error {
+// writeAddonStatus applies mutate to the addon status, derives the conditions from the
+// result (reason and condMsg explain a Pending or Failed phase), and writes only when
+// something changed. Writing an unchanged status would still wake this reconciler through
+// the OdooAddon watch, so skipping no-op writes keeps the loop quiet. After a real write
+// the transition events are emitted.
+func (r *OdooAddonReconciler) writeAddonStatus(ctx context.Context, addon *odoov1.OdooAddon,
+	reason, condMsg string, mutate func(*odoov1.OdooAddonStatus)) error {
 	before := addon.Status.DeepCopy()
 	mutate(&addon.Status)
+	setConditions(&addon.Status.Conditions, addon.Generation, addonConditions(addon.Status, reason, condMsg))
 	if equality.Semantic.DeepEqual(before, &addon.Status) {
 		return nil
 	}
-	return r.Status().Update(ctx, addon)
+	after := addon.Status.DeepCopy()
+	if err := r.Status().Update(ctx, addon); err != nil {
+		return err
+	}
+	emitEvents(r.Recorder, addon, addonEvents(*before, *after))
+	return nil
 }
 
 func (r *OdooAddonReconciler) ensureVolumeMounted(ctx context.Context, instance *odoov1.OdooInstance, pvcName string) (bool, error) {
@@ -442,15 +473,6 @@ func (r *OdooAddonReconciler) readJobLogs(ctx context.Context, job *batchv1.Job)
 	return string(data), nil
 }
 
-// jobLogTail returns the last ~2000 bytes of the Job's logs, best effort.
-func (r *OdooAddonReconciler) jobLogTail(ctx context.Context, job *batchv1.Job) string {
-	logs, err := r.readJobLogs(ctx, job)
-	if err != nil {
-		return ""
-	}
-	return upgradeTail(logs, addonLogTailBytes)
-}
-
 // readSyncOutput returns the commit SHA and the module list a sync Job printed. A missing
 // or malformed modules line yields no modules; only a missing commit is an error.
 func (r *OdooAddonReconciler) readSyncOutput(ctx context.Context, job *batchv1.Job) (string, []string, error) {
@@ -522,9 +544,17 @@ func (r *OdooAddonReconciler) handleFinalizer(ctx context.Context, addon *odoov1
 		return r.finishDeletion(ctx, addon, nil, false, cleanup)
 	case observed.Failed:
 		addonLogger.Info("cleanup Job failed; removing the finalizer anyway", "addon", addon.Name)
+		emitEvents(r.Recorder, addon, []statusEvent{{
+			Type: corev1.EventTypeWarning, Reason: eventReasonCleanupFailed, Action: eventActionCleanup,
+			Message: "cleanup Job failed; the addon's files may remain on the addons volume. The finalizer is removed anyway",
+		}})
 		return r.finishDeletion(ctx, addon, nil, false, cleanup)
 	case time.Since(cleanup.CreationTimestamp.Time) > cleanupTimeout:
 		addonLogger.Info("cleanup Job overran; removing the finalizer anyway", "addon", addon.Name)
+		emitEvents(r.Recorder, addon, []statusEvent{{
+			Type: corev1.EventTypeWarning, Reason: eventReasonCleanupTimeout, Action: eventActionCleanup,
+			Message: fmt.Sprintf("cleanup Job still running after %s; the finalizer is removed anyway", cleanupTimeout),
+		}})
 		return r.finishDeletion(ctx, addon, nil, false, cleanup)
 	}
 	return ctrl.Result{RequeueAfter: addonCleanupRequeue}, nil

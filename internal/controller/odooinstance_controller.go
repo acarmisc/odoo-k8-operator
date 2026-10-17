@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -51,6 +52,8 @@ var odooLogger = logf.Log.WithName("controller_odooinstance")
 type OdooInstanceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Recorder emits Events on status transitions. Nil disables events.
+	Recorder events.EventRecorder
 }
 
 func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -77,13 +80,22 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	before := instance.Status.DeepCopy()
 	result, err := r.reconcileOdooInstance(ctx, instance)
 	if err != nil {
 		odooLogger.Error(err, "Failed to reconcile OdooInstance")
 		instance.Status.Phase = phaseFailing
 		instance.Status.Ready = false
+		setConditions(&instance.Status.Conditions, instance.Generation, instanceConditions(instanceCondFacts{
+			Phase:      phaseFailing,
+			ErrReason:  reconcileErrorReason(err),
+			ErrMessage: err.Error(),
+		}))
+		instance.Status.Message = instanceSummary(instance.Status.Conditions)
 		if statusErr := r.Status().Update(ctx, instance); statusErr != nil {
 			odooLogger.Error(statusErr, "Failed to update instance status")
+		} else {
+			emitEvents(r.Recorder, instance, instanceEvents(*before, instance.Status, ""))
 		}
 		return ctrl.Result{}, err
 	}
@@ -91,7 +103,10 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return result, nil
 }
 
+// reconcileOdooInstance runs one pass. It writes the status once at the end and emits the
+// transition events for that write.
 func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, instance *odoov1.OdooInstance) (ctrl.Result, error) {
+	before := instance.Status.DeepCopy()
 	instance.Status.Phase = phaseCreating
 	instance.Status.ObservedGeneration = instance.Generation
 
@@ -101,7 +116,7 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 
 	conf, err := renderOdooConf(&instance.Spec)
 	if err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, withReason(odoov1.ReasonInvalidConfig, err)
 	}
 	if err := r.reconcileConfigMap(ctx, instance, conf); err != nil {
 		return ctrl.Result{}, err
@@ -139,8 +154,12 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 	instance.Status.AddonPaths = addonMountPaths(addons)
 
 	deploy := &appsv1.Deployment{}
+	desired := desiredReplicas(&instance.Spec)
+	deployFound := false
+	var readyReplicas int32
 	if getErr := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, deploy); getErr == nil {
-		desired := desiredReplicas(&instance.Spec)
+		deployFound = true
+		readyReplicas = deploy.Status.ReadyReplicas
 		if deploy.Status.ReadyReplicas >= desired {
 			instance.Status.Phase = phaseRunning
 			instance.Status.Ready = true
@@ -163,7 +182,22 @@ func (r *OdooInstanceReconciler) reconcileOdooInstance(ctx context.Context, inst
 		instance.Status.Ready = false
 		result.RequeueAfter = gateFailedRequeue
 	}
-	return result, r.Status().Update(ctx, instance)
+
+	setConditions(&instance.Status.Conditions, instance.Generation, instanceConditions(instanceCondFacts{
+		Phase:           instance.Status.Phase,
+		DeploymentFound: deployFound,
+		ReadyReplicas:   readyReplicas,
+		DesiredReplicas: desired,
+		ActiveUpgrade:   instance.Status.ActiveUpgrade,
+		UpgradeMessage:  gate.upgradeMessage,
+	}))
+	instance.Status.Message = instanceSummary(instance.Status.Conditions)
+
+	if err := r.Status().Update(ctx, instance); err != nil {
+		return result, err
+	}
+	emitEvents(r.Recorder, instance, instanceEvents(*before, instance.Status, gate.succeededUpgrade))
+	return result, nil
 }
 
 // referencedSecrets fetches every Secret the pod consumes. A missing Secret is
@@ -186,7 +220,8 @@ func (r *OdooInstanceReconciler) referencedSecrets(ctx context.Context, instance
 		key := types.NamespacedName{Name: ref.name, Namespace: instance.Namespace}
 		if err := r.Get(ctx, key, secret); err != nil {
 			if errors.IsNotFound(err) {
-				return nil, fmt.Errorf("secret %q referenced by %s does not exist in namespace %q", ref.name, ref.field, instance.Namespace)
+				return nil, withReason(odoov1.ReasonMissingSecret,
+					fmt.Errorf("secret %q referenced by %s does not exist in namespace %q", ref.name, ref.field, instance.Namespace))
 			}
 			return nil, fmt.Errorf("get secret %q: %w", ref.name, err)
 		}

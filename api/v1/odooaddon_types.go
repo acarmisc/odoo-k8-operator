@@ -61,6 +61,13 @@ type OdooAddonStatus struct {
 	Modules []string `json:"modules,omitempty"`
 	// Message explains the current phase, e.g. why the last sync failed.
 	Message string `json:"message,omitempty"`
+	// Conditions hold Ready, Progressing and Degraded. The reasons are listed in docs/odooaddon.md.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +patchStrategy=merge
+	// +patchMergeKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true

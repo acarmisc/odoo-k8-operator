@@ -52,6 +52,15 @@ Status:
 | `status.jobName` | Name of the Job, `<name>-run`. |
 | `status.message` | Reason for `Pending` (waiting) or `Failed`. For a failed Job it includes `--- last log lines ---` and up to about 2000 bytes of the pod log. |
 | `status.startTime`, `status.completionTime` | When the Job started and when it finished. |
+| `status.conditions` | `Succeeded` and `Progressing`. See below. |
+
+| Type | Status | Reasons |
+|---|---|---|
+| `Succeeded` | `True` | `Complete`. |
+| `Succeeded` | `False` | `JobFailed`, or `InvalidSpec` (for example no database). |
+| `Succeeded` | `Unknown` | `Pending` (queued behind another upgrade), `InstanceNotFound`, `Running`. |
+| `Progressing` | `True` | `Running`. |
+| `Progressing` | `False` | `Pending`, `Complete`, `JobFailed`, `InvalidSpec`. |
 
 `Succeeded` and `Failed` are final. The controller does not change them again.
 

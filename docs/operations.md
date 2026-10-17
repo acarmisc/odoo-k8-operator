@@ -31,9 +31,23 @@ kubectl -n odoo get pods -l app=odoo,instance=shop
 kubectl -n odoo describe odooinstance shop
 kubectl -n odoo get odooinstance shop -o jsonpath='{.status}{"\n"}'
 kubectl -n odoo get odooaddon shop-modules -o jsonpath='{.status}{"\n"}'
+
+# Conditions only: type, status, reason and message
+kubectl -n odoo get odooinstance shop -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
+
+# Events of one object (the operator emits them on status changes only)
+kubectl -n odoo get events --field-selector involvedObject.name=shop
 ```
 
 `kubectl get` prints `Ready`, `Phase` and `Age` for each kind. Add `-o wide` for the other columns.
+
+Each kind has `Ready`, `Progressing` and `Degraded` conditions, or `Succeeded` and `Progressing` for an upgrade. The reasons are listed in [odooinstance.md](odooinstance.md#status), [odooaddon.md](odooaddon.md#status) and [upgrades.md](upgrades.md). The operator also emits these Events:
+
+| Object | Normal | Warning |
+|---|---|---|
+| OdooInstance | `RolledOut`, `UpgradeStarted`, `UpgradeSucceeded` | `ReconcileFailed`, `UpgradeFailed` |
+| OdooAddon | `SyncStarted`, `SyncSucceeded` | `SyncFailed`, `ModuleConflict`, `CleanupFailed`, `CleanupTimeout` |
+| OdooUpgrade | `Started`, `Succeeded` | `Failed` |
 
 Only the pods carry the `app` and `instance` labels. The Service, the ConfigMap and the PVCs are found by name.
 
@@ -79,10 +93,11 @@ kubectl -n odoo-k8-operator-system logs deploy/odoo-k8-operator-controller-manag
 
    Typical causes: the database cannot be reached, TLS is not accepted (`db_sslmode = require`), the password is wrong, or the database does not exist or is not initialised.
 
-3. If `PHASE` is `Failed`, the operator refused or could not reconcile the instance. The reason is only in the operator log:
+3. If `Degraded` is `True`, or `PHASE` is `Failed`, the operator refused or could not reconcile the instance. The `Degraded` condition gives the reason and the message, and the `ReconcileFailed` Event names the same error:
 
    ```bash
-   kubectl -n odoo-k8-operator-system logs deploy/odoo-k8-operator-controller-manager | grep -i 'failed to reconcile' | tail -5
+   kubectl -n odoo get odooinstance shop -o jsonpath='{.status.conditions[?(@.type=="Degraded")]}{"\n"}'
+   kubectl -n odoo describe odooinstance shop
    ```
 
    The messages are listed in [Common error messages](#common-error-messages).
@@ -160,7 +175,7 @@ The Job is removed by the operator when it ends, so read `kubectl logs job/...` 
 
 **Symptom:** `PHASE` is `Failed`.
 
-Read the message first:
+Read the message first. The `Degraded` condition holds the same message, with the reason (`SyncFailed`, `ModuleConflict`, `InvalidSpec` or `JobConflict`):
 
 ```bash
 kubectl -n odoo get odooaddon shop-modules -o jsonpath='{.status.message}{"\n"}'
@@ -196,7 +211,7 @@ Use these in order. Each one is safe.
 
 **Symptom:** the OdooInstance is `UpgradeFailed`, or an OdooUpgrade is `Failed`.
 
-1. Read the message:
+1. Read the message. The `Succeeded` condition has the same reason and message:
 
    ```bash
    kubectl -n odoo get odooupgrade
@@ -244,7 +259,7 @@ Deleting a `Running` OdooUpgrade also deletes its Job. The operator then creates
 
 ## Common error messages
 
-### Instance (phase `Failed`, operator log)
+### Instance (`Degraded` condition message)
 
 | Message | Meaning and fix |
 |---|---|

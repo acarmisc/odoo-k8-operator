@@ -229,8 +229,9 @@ func main() {
 	}
 
 	if err := (&controller.OdooInstanceReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("odooinstance-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OdooInstance")
 		os.Exit(1)
@@ -245,6 +246,7 @@ func main() {
 		Scheme:                  mgr.GetScheme(),
 		Clientset:               clientset,
 		MaxConcurrentReconciles: addonMaxConcurrentReconciles,
+		Recorder:                mgr.GetEventRecorder("odooaddon-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OdooAddon")
 		os.Exit(1)
@@ -253,6 +255,7 @@ func main() {
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Clientset: clientset,
+		Recorder:  mgr.GetEventRecorder("odooupgrade-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OdooUpgrade")
 		os.Exit(1)

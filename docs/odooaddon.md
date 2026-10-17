@@ -228,6 +228,20 @@ Notes:
 | `status.modules` | Module names published by the last successful sync. The OdooInstance uses them for `status.addonPaths`. |
 | `status.lastSyncTime` | When the last sync ended, successful or not. |
 | `status.message` | Reason for `Failed`. For a failed Job it is the Job's failure reason, then `--- last log lines ---` and up to about 2000 bytes of the log. |
+| `status.conditions` | `Ready`, `Progressing` and `Degraded`. See below. |
+
+Conditions use the usual shape. The reasons:
+
+| Type | Status | Reasons |
+|---|---|---|
+| `Ready` | `True` | `Synced`: the commit and the module count are in the message. |
+| `Ready` | `False` | `InstanceNotFound` or `VolumeNotBound` (Pending), `Syncing`, `SyncFailed`, `InvalidSpec`, `JobConflict`, `ModuleConflict`. |
+| `Progressing` | `True` | `Syncing`: the sync Job is running. |
+| `Progressing` | `False` | `Synced`, `Pending`, or the failure reason. |
+| `Degraded` | `True` | `SyncFailed`, `InvalidSpec`, `JobConflict`, `ModuleConflict`. |
+| `Degraded` | `False` | `AsExpected`. |
+
+`ModuleConflict` means the sync script found a module that another addon already provides. The log tail names both addons.
 
 Printed columns: `Ready`, `Phase`, `Instance`, `Git URL`, `Age`.
 

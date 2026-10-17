@@ -125,7 +125,7 @@ func (r *OdooInstanceReconciler) reconcileSinglePVC(ctx context.Context, instanc
 	}
 	quantity, err := resource.ParseQuantity(size)
 	if err != nil {
-		return fmt.Errorf("invalid size %q for PVC %s: %w", size, req.name, err)
+		return withReason(odoov1.ReasonInvalidConfig, fmt.Errorf("invalid size %q for PVC %s: %w", size, req.name, err))
 	}
 
 	newPVC := &corev1.PersistentVolumeClaim{

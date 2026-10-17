@@ -69,6 +69,11 @@ type gateDecision struct {
 	phase string
 	// ensureUpgrade asks the reconciler to create the OdooUpgrade if it is missing.
 	ensureUpgrade bool
+	// upgradeMessage is the status.message of the upgrade named by activeUpgrade, used in
+	// the UpgradeFailed condition.
+	upgradeMessage string
+	// succeededUpgrade names the OdooUpgrade that succeeded in this pass, for its event.
+	succeededUpgrade string
 }
 
 // gateDecide maps the current state to a rollout decision. It has no side effects.
@@ -118,6 +123,7 @@ func (r *OdooInstanceReconciler) gateAddonsRollout(ctx context.Context, instance
 		applied:    instance.Status.AppliedAddonsHash,
 		current:    current,
 	}
+	var upgradeMessage string
 	if in.upgradeSet && in.applied != "" && in.applied != current {
 		in.upgradeName = gateUpgradeName(instance.Name, current)
 		upgrade := &odoov1.OdooUpgrade{}
@@ -134,6 +140,7 @@ func (r *OdooInstanceReconciler) gateAddonsRollout(ctx context.Context, instance
 		default:
 			in.upgradeExists = true
 			in.upgradePhase = upgrade.Status.Phase
+			upgradeMessage = upgrade.Status.Message
 		}
 	}
 
@@ -146,6 +153,12 @@ func (r *OdooInstanceReconciler) gateAddonsRollout(ctx context.Context, instance
 	if decision.phase == gatePhaseUpgradeFailed {
 		odooLogger.Info("OdooUpgrade failed; keeping the applied addons revision",
 			"instance", instance.Name, "upgrade", in.upgradeName)
+	}
+	decision.upgradeMessage = upgradeMessage
+	// An existing upgrade that succeeded is the only way gateDecide reaches the rollout
+	// through a Succeeded phase, so this is the moment the upgrade completed.
+	if in.upgradeExists && in.upgradePhase == odoov1.UpgradePhaseSucceeded {
+		decision.succeededUpgrade = in.upgradeName
 	}
 
 	instance.Status.AppliedAddonsHash = decision.appliedHash

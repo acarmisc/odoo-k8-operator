@@ -62,6 +62,13 @@ type OdooUpgradeStatus struct {
 	StartTime          *metav1.Time `json:"startTime,omitempty"`
 	CompletionTime     *metav1.Time `json:"completionTime,omitempty"`
 	ObservedGeneration int64        `json:"observedGeneration,omitempty"`
+	// Conditions hold Succeeded and Progressing. The reasons are listed in docs/upgrades.md.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +patchStrategy=merge
+	// +patchMergeKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true

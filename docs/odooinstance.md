@@ -148,6 +148,8 @@ The hash of this file is a pod-template annotation. Any change to it rolls the p
 | `status.appliedAddonsHash` | string | Addons revision the running pods were rolled out with. With `spec.upgrade` set, it only advances after the matching upgrade succeeded. |
 | `status.activeUpgrade` | string | Name of the OdooUpgrade that currently holds the rollout, if any. |
 | `status.observedGeneration` | int64 | Generation the operator last reconciled. |
+| `status.conditions` | list | `Ready`, `Progressing` and `Degraded`. See below. |
+| `status.message` | string | Summary of the state: the `Degraded` message while degraded, otherwise the `Ready` message while not ready. |
 
 Phases:
 
@@ -159,7 +161,18 @@ Phases:
 | `Upgrading` | A new addons revision is ready, and the pods stay on the previous revision until the OdooUpgrade succeeds. |
 | `UpgradeFailed` | The OdooUpgrade failed. The pods stay on the previous revision and `ready` is `false`. |
 
-`status.ready` and `status.phase` are the only summary fields. There is no `status.message`. For the reason behind a `Failed` phase, read the operator log (see [operations.md](operations.md#instance-is-not-ready)).
+Conditions use the usual Kubernetes shape: `type`, `status`, `reason`, `message`, `lastTransitionTime` and `observedGeneration`. Read the `reason` for scripts and the `message` for people.
+
+| Type | Status | Reasons |
+|---|---|---|
+| `Ready` | `True` | `AllReplicasReady`: the Deployment has `replicas` ready pods. |
+| `Ready` | `False` | `DeploymentNotReady`, `UpgradeFailed`, `MissingSecret`, `InvalidConfig`, `ReconcileError`. |
+| `Progressing` | `True` | `Reconciling`: the Deployment is rolling out. `Upgrading`: an OdooUpgrade holds the rollout. |
+| `Progressing` | `False` | `Reconciled`, `UpgradeFailed`, `ReconcileError`. |
+| `Degraded` | `False` | `AsExpected`. |
+| `Degraded` | `True` | `MissingSecret`, `InvalidConfig`, `ReconcileError`, `UpgradeFailed`. |
+
+`MissingSecret` names a Secret that does not exist. `InvalidConfig` is a bad `spec.config` key or value, or a bad size. The `ReconcileFailed` Event carries the same message. For the commands, see [operations.md](operations.md#read-the-state).
 
 ## Generated objects
 

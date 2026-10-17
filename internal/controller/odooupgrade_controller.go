@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -67,12 +68,20 @@ type OdooUpgradeReconciler struct {
 	Scheme *runtime.Scheme
 	// Clientset reads Job pod logs.
 	Clientset kubernetes.Interface
+	// Recorder emits Events on status transitions. Nil disables events.
+	Recorder events.EventRecorder
 }
 
 func (r *OdooUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	up := &odoov1.OdooUpgrade{}
 	if err := r.Get(ctx, req.NamespacedName, up); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if up.Status.Phase != "" && len(up.Status.Conditions) == 0 {
+		// Upgrades that predate conditions get them once, here.
+		if err := r.upgradeBackfillConditions(ctx, req.NamespacedName); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	switch up.Status.Phase {
@@ -85,7 +94,7 @@ func (r *OdooUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if err := upgradeValidateSpec(up); err != nil {
-		return ctrl.Result{}, r.upgradeWriteStatus(ctx, req.NamespacedName, odoov1.UpgradePhaseFailed, func(s *odoov1.OdooUpgradeStatus) {
+		return ctrl.Result{}, r.upgradeWriteStatus(ctx, req.NamespacedName, odoov1.UpgradePhaseFailed, odoov1.ReasonInvalidSpec, func(s *odoov1.OdooUpgradeStatus) {
 			s.Phase = odoov1.UpgradePhaseFailed
 			s.Message = err.Error()
 		})
@@ -95,7 +104,7 @@ func (r *OdooUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	key := types.NamespacedName{Name: up.Spec.InstanceRef.Name, Namespace: up.Namespace}
 	if err := r.Get(ctx, key, inst); err != nil {
 		if apierrors.IsNotFound(err) {
-			return r.upgradeSetPending(ctx, req.NamespacedName, upgradeMsgWaitingInstance)
+			return r.upgradeSetPending(ctx, req.NamespacedName, odoov1.ReasonInstanceNotFound, upgradeMsgWaitingInstance)
 		}
 		return ctrl.Result{}, err
 	}
@@ -105,7 +114,8 @@ func (r *OdooUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 	if decision := upgradeDecideStart(up, siblings.Items); !decision.MayStart {
-		return r.upgradeSetPending(ctx, req.NamespacedName, fmt.Sprintf(upgradeMsgQueued, decision.BlockedBy))
+		return r.upgradeSetPending(ctx, req.NamespacedName, odoov1.ReasonPending,
+			fmt.Sprintf(upgradeMsgQueued, decision.BlockedBy))
 	}
 
 	return r.upgradeStart(ctx, up, inst)
@@ -116,7 +126,7 @@ func (r *OdooUpgradeReconciler) upgradeStart(ctx context.Context, up *odoov1.Odo
 	key := client.ObjectKeyFromObject(up)
 	database := upgradeDatabase(up, inst)
 	if database == "" {
-		return ctrl.Result{}, r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseFailed, func(s *odoov1.OdooUpgradeStatus) {
+		return ctrl.Result{}, r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseFailed, odoov1.ReasonInvalidSpec, func(s *odoov1.OdooUpgradeStatus) {
 			s.Phase = odoov1.UpgradePhaseFailed
 			s.Message = upgradeMsgNoDatabase
 		})
@@ -136,7 +146,7 @@ func (r *OdooUpgradeReconciler) upgradeStart(ctx context.Context, up *odoov1.Odo
 	}
 
 	now := metav1.Now()
-	err := r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseRunning, func(s *odoov1.OdooUpgradeStatus) {
+	err := r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseRunning, odoov1.ReasonRunning, func(s *odoov1.OdooUpgradeStatus) {
 		s.Phase = odoov1.UpgradePhaseRunning
 		s.JobName = job.Name
 		s.Message = ""
@@ -158,7 +168,7 @@ func (r *OdooUpgradeReconciler) upgradeMonitor(ctx context.Context, up *odoov1.O
 			return ctrl.Result{RequeueAfter: upgradeRequeueRunning}, nil
 		}
 		jobName := up.Status.JobName
-		return ctrl.Result{}, r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseFailed, func(s *odoov1.OdooUpgradeStatus) {
+		return ctrl.Result{}, r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseFailed, odoov1.ReasonJobFailed, func(s *odoov1.OdooUpgradeStatus) {
 			s.Phase = odoov1.UpgradePhaseFailed
 			s.Message = fmt.Sprintf(upgradeMsgJobGone, jobName)
 			s.CompletionTime = upgradeNowPtr()
@@ -170,7 +180,7 @@ func (r *OdooUpgradeReconciler) upgradeMonitor(ctx context.Context, up *odoov1.O
 
 	if upgradeJobSucceeded(job) {
 		completion := upgradeJobCompletion(job)
-		return ctrl.Result{}, r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseSucceeded, func(s *odoov1.OdooUpgradeStatus) {
+		return ctrl.Result{}, r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseSucceeded, odoov1.ReasonComplete, func(s *odoov1.OdooUpgradeStatus) {
 			s.Phase = odoov1.UpgradePhaseSucceeded
 			s.Message = ""
 			s.CompletionTime = completion
@@ -182,7 +192,7 @@ func (r *OdooUpgradeReconciler) upgradeMonitor(ctx context.Context, up *odoov1.O
 		if tail := r.upgradeLogTail(ctx, up); tail != "" {
 			msg += upgradeMsgLogHeader + tail
 		}
-		return ctrl.Result{}, r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseFailed, func(s *odoov1.OdooUpgradeStatus) {
+		return ctrl.Result{}, r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhaseFailed, odoov1.ReasonJobFailed, func(s *odoov1.OdooUpgradeStatus) {
 			s.Phase = odoov1.UpgradePhaseFailed
 			s.Message = msg
 			s.CompletionTime = upgradeNowPtr()
@@ -193,19 +203,23 @@ func (r *OdooUpgradeReconciler) upgradeMonitor(ctx context.Context, up *odoov1.O
 }
 
 // upgradeSetPending records that the upgrade waits for its instance or for an older upgrade.
-func (r *OdooUpgradeReconciler) upgradeSetPending(ctx context.Context, key types.NamespacedName, msg string) (ctrl.Result, error) {
-	err := r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhasePending, func(s *odoov1.OdooUpgradeStatus) {
+// reason is InstanceNotFound or Pending and only feeds the Succeeded condition.
+func (r *OdooUpgradeReconciler) upgradeSetPending(ctx context.Context, key types.NamespacedName, reason, msg string) (ctrl.Result, error) {
+	err := r.upgradeWriteStatus(ctx, key, odoov1.UpgradePhasePending, reason, func(s *odoov1.OdooUpgradeStatus) {
 		s.Phase = odoov1.UpgradePhasePending
 		s.Message = msg
 	})
 	return ctrl.Result{RequeueAfter: upgradeRequeuePending}, err
 }
 
-// upgradeWriteStatus applies mutate to the freshest copy of the upgrade's status and
-// writes it only when something changed. It retries on conflicts and tolerates a
-// deleted upgrade. target is the phase being written: a write computed from a stale
-// cache must never leave a terminal phase, or move Running back to Pending.
-func (r *OdooUpgradeReconciler) upgradeWriteStatus(ctx context.Context, key types.NamespacedName, target string, mutate func(*odoov1.OdooUpgradeStatus)) error {
+// upgradeWriteStatus applies mutate to the freshest copy of the upgrade's status, derives
+// the conditions from the result (reason explains a Pending or Failed phase), and writes
+// only when something changed. It retries on conflicts and tolerates a deleted upgrade.
+// target is the phase being written: a write computed from a stale cache must never leave
+// a terminal phase, or move Running back to Pending. Transition events are emitted after
+// a real write.
+func (r *OdooUpgradeReconciler) upgradeWriteStatus(ctx context.Context, key types.NamespacedName, target, reason string,
+	mutate func(*odoov1.OdooUpgradeStatus)) error {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &odoov1.OdooUpgrade{}
 		if err := r.Get(ctx, key, cur); err != nil {
@@ -220,9 +234,32 @@ func (r *OdooUpgradeReconciler) upgradeWriteStatus(ctx context.Context, key type
 		before := cur.Status.DeepCopy()
 		mutate(&cur.Status)
 		cur.Status.ObservedGeneration = cur.Generation
+		setConditions(&cur.Status.Conditions, cur.Generation, upgradeConditions(cur.Status, reason))
 		if equality.Semantic.DeepEqual(before, &cur.Status) {
 			return nil
 		}
+		after := cur.Status.DeepCopy()
+		if err := r.Status().Update(ctx, cur); err != nil {
+			return err
+		}
+		emitEvents(r.Recorder, cur, upgradeEvents(*before, *after))
+		return nil
+	})
+	return client.IgnoreNotFound(err)
+}
+
+// upgradeBackfillConditions writes the conditions of an upgrade that has a phase but no
+// conditions yet. It touches nothing else and does nothing once conditions exist.
+func (r *OdooUpgradeReconciler) upgradeBackfillConditions(ctx context.Context, key types.NamespacedName) error {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &odoov1.OdooUpgrade{}
+		if err := r.Get(ctx, key, cur); err != nil {
+			return err
+		}
+		if cur.Status.Phase == "" || len(cur.Status.Conditions) > 0 {
+			return nil
+		}
+		setConditions(&cur.Status.Conditions, cur.Generation, upgradeConditions(cur.Status, ""))
 		return r.Status().Update(ctx, cur)
 	})
 	return client.IgnoreNotFound(err)

@@ -152,6 +152,7 @@ If a namespace is missing from either place the objects there are ignored (no Ro
 | apps | `deployments` | full | Odoo Deployments. |
 | policy | `poddisruptionbudgets` | full | PDB when `replicas > 1`. |
 | batch | `jobs` | full | Sync Jobs and upgrade Jobs. The operator deletes sync Jobs when they finish. |
+| events.k8s.io | `events` | create, patch | Emit Events on transitions (sync, upgrade, rollout, errors). |
 | odoo.operator.io | the three CRDs, their `/status` and `/finalizers` | full | Reconcile and status writes, and finalizers. |
 
 Leader election uses a namespaced Role in the operator namespace (`configmaps` and `coordination.k8s.io/leases`).

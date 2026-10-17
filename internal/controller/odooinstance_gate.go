@@ -127,6 +127,10 @@ func (r *OdooInstanceReconciler) gateAddonsRollout(ctx context.Context, instance
 			in.upgradeExists = false
 		case err != nil:
 			return gateDecision{}, fmt.Errorf("get OdooUpgrade %q: %w", in.upgradeName, err)
+		case upgrade.Spec.InstanceRef.Name != instance.Name:
+			// Truncated names of two instances with the same long prefix can collide.
+			return gateDecision{}, fmt.Errorf("OdooUpgrade %q belongs to instance %q, not %q",
+				in.upgradeName, upgrade.Spec.InstanceRef.Name, instance.Name)
 		default:
 			in.upgradeExists = true
 			in.upgradePhase = upgrade.Status.Phase

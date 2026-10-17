@@ -26,3 +26,8 @@ spec:
   config:
     workers: "4"
     limit_time_real: "120"
+  # Run `odoo -u <modules>` (OdooUpgrade) whenever synced addon commits change, and only
+  # roll the pods out once the upgrade Job succeeded. Omit to roll out immediately.
+  # upgrade:
+  #   modules: ["all"]        # or a list such as ["geox_theme", "sale_custom"]
+  #   timeoutSeconds: 1800

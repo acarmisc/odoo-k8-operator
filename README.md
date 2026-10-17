@@ -142,6 +142,13 @@ spec:
   Pin `gitRef` to a commit SHA for reproducible deployments.
 - **Atomic addon updates**: each sync stages modules in `.releases/<addon>/<sha>/` and switches symlinks with an atomic
   rename; Odoo never sees a half-copied module. The two latest releases are kept for rollback.
+- **Module upgrades**: set `spec.upgrade.modules` on the `OdooInstance` and, whenever the synced addon commits change,
+  the operator creates an `OdooUpgrade` (`odoo -u <modules> --stop-after-init` in a Job using the instance's image,
+  config and database) and keeps the running pods on the previous revision until it succeeds. Status shows
+  `Upgrading` / `UpgradeFailed`; to retry a failed upgrade delete the failed `OdooUpgrade`. Upgrades for one instance
+  run one at a time. You can also create an `OdooUpgrade` by hand (spec is immutable; `modules` and/or `installModules`).
+  Note: addon files on the shared volume already point at the new revision while the upgrade runs, and image/config
+  changes are not gated.
 - The sync Job image defaults to `alpine/git:2.47.2`; override it with the `OPERATOR_SYNC_IMAGE` env var on the manager.
 
 ## Development

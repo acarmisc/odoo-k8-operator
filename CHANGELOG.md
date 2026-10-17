@@ -48,4 +48,6 @@ The operator now watches only the namespaces in `WATCH_NAMESPACES` (default: its
 ### Known limitations
 See the "Known limitations" section of [docs/production-guide.md](docs/production-guide.md).
 Initialisation, backup and cron flows are covered by envtest only; they have not been run against a real
-Odoo and PostgreSQL in CI.
+Odoo and PostgreSQL in CI. With `ReadWriteOnce` volumes the cron pod is pinned to a web pod's node at
+scheduling time; a later web rollout onto another node can wait on a Multi-Attach error (use
+`ReadWriteMany`). There is no automated restore, Ingress or HPA.

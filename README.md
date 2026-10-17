@@ -9,6 +9,10 @@ The Odoo Kubernetes Operator runs Odoo instances and your custom Odoo modules on
 - **Atomic module updates.** Each sync publishes modules as symlinks into a release directory, so Odoo never sees a half-copied module.
 - **Automatic rollouts.** Pods roll when `spec.config`, a referenced Secret or a synced commit changes. Passwords are never written to the ConfigMap.
 - **Module upgrades.** `spec.upgrade` runs `odoo -u` after the code changes, and holds the pods on the old code until the upgrade succeeds. You can also run an `OdooUpgrade` by hand.
+- **First installation.** `spec.initialize` creates and initialises the database (installs the modules you list, no demo data by default, sets the `admin` password from a Secret) before any Odoo pod starts.
+- **Backups.** `OdooBackup` dumps PostgreSQL and the filestore to a PVC or S3-compatible storage, once or on a schedule, with retention.
+- **Web and cron split.** `spec.cron` runs Odoo cron workers in a dedicated Deployment, so web pods can scale freely.
+- **Visible status.** Conditions and Kubernetes Events on every resource explain what the operator is doing and why it failed.
 - **Hardened pods.** Non-root, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service account token.
 - **Non-blocking reconciles.** Syncs and upgrades run as Jobs. Many addons sync in parallel.
 
@@ -24,7 +28,7 @@ The Odoo Kubernetes Operator runs Odoo instances and your custom Odoo modules on
 
 ## Quick start
 
-These steps take you from an empty namespace to a running Odoo on a cluster with a default StorageClass. They assume a PostgreSQL database `odoo` is reachable at `postgres.databases.svc.cluster.local` and already initialised. If it is empty, see the note after step 5.
+These steps take you from an empty namespace to a running Odoo on a cluster with a default StorageClass. They assume a PostgreSQL server is reachable at `postgres.databases.svc.cluster.local` and that the `odoo` user may create the `odoo` database (or the database already exists and is empty).
 
 **1. Install the CRDs.**
 
@@ -55,6 +59,7 @@ kubectl -n odoo-k8-operator-system set env deployment/odoo-k8-operator-controlle
 ```bash
 kubectl -n odoo create secret generic odoo-db    --from-literal=password='<db-password>'
 kubectl -n odoo create secret generic odoo-admin --from-literal=password='<master-password>'
+kubectl -n odoo create secret generic odoo-login --from-literal=password='<password-of-the-odoo-admin-user>'
 ```
 
 **5. Create an OdooInstance.**
@@ -74,26 +79,17 @@ spec:
     database: odoo
     user: odoo
     passwordSecret: odoo-db
-  adminPasswordSecret: odoo-admin
+  adminPasswordSecret: odoo-admin      # Odoo master (database manager) password
+  initialize:                          # first installation only
+    modules: ["base"]
+    adminUserPasswordSecret: odoo-login  # password of the Odoo `admin` user
 ```
 
 ```bash
 kubectl apply -f demo-instance.yaml
 ```
 
-If the database is empty, install the base module with an OdooUpgrade. The database must exist. See [upgrades.md](docs/upgrades.md#manual-upgrade). This path is not yet confirmed on a live cluster.
-
-```yaml
-apiVersion: odoo.operator.io/v1
-kind: OdooUpgrade
-metadata:
-  name: demo-init
-  namespace: odoo
-spec:
-  instanceRef:
-    name: demo
-  installModules: ["base"]
-```
+The operator runs a one-time initialisation Job (`demo-init`) before any Odoo pod starts. Watch it with `kubectl -n odoo get odooinstance demo -w`: the phase goes `Initializing`, then `Creating`, then `Running`. To initialise an existing database by hand instead, use an `OdooUpgrade` ([upgrades.md](docs/upgrades.md#manual-upgrade)). Initialisation has only been tested with envtest, not against a live Odoo.
 
 **6. Create an OdooAddon** for a repository of modules. This example uses a public repository and the `main` branch.
 
@@ -138,7 +134,7 @@ Then open <http://localhost:8069>.
 |---|---|---|
 | `OdooInstance` | none | One Odoo deployment: image, database, storage, `odoo.conf` settings, resources. Owns the Deployment, Service, ConfigMap, PVCs and PDB. |
 | `OdooAddon` | none | A Git repository of modules, synced into one OdooInstance's addons volume. Has phases `Pending`, `Syncing`, `Synced`, `Failed`. |
-| `OdooUpgrade` | none | A one-shot `odoo -u` or `-i` run against an instance's database. Created by hand or by `spec.upgrade`. Has phases `Pending`, `Running`, `Succeeded`, `Failed`. |
+| `OdooUpgrade` | none | A one-shot `odoo -u` or `-i` run against an instance's database. Created by hand, by `spec.upgrade` or by `spec.initialize`. Has phases `Pending`, `Running`, `Succeeded`, `Failed`. |
 | `OdooBackup` | none | A `pg_dump` of an instance's database plus its filestore, to a PVC or S3, one-shot or on a cron schedule. Has phases `Pending`, `Running`, `Succeeded`, `Failed`, `Scheduled`. |
 
 Use the full kind names with `kubectl`, for example `kubectl get odooinstance`.
@@ -154,6 +150,7 @@ Before you run real users on an instance, check these. Each item links to the de
 - [ ] **Network.** Add a NetworkPolicy for each instance. The operator does not create one. ([production-guide](docs/production-guide.md#security))
 - [ ] **Resources.** Set `resources` explicitly. The defaults are small for Odoo with several workers. ([odooinstance](docs/odooinstance.md#resources-default))
 - [ ] **Monitoring.** Scrape the operator, and alert on instances that are not ready and addons in `Failed`. ([production-guide](docs/production-guide.md#monitoring))
+- [ ] **Web and cron.** For more than one web replica, set `spec.cron.enabled` so cron runs in one dedicated pod. ([odooinstance](docs/odooinstance.md))
 - [ ] **Backups.** Create an `OdooBackup` (one-shot or scheduled) and test a restore. ([backups](docs/backups.md))
 
 ## Documentation

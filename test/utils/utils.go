@@ -80,7 +80,8 @@ func Output(cmd *exec.Cmd) (string, error) {
 
 // ApplyManifest pipes a manifest (YAML or JSON) to kubectl apply.
 func ApplyManifest(manifest string) error {
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	// Test helper: kubectl is resolved through PATH on purpose, like every other command in this package.
+	cmd := exec.Command("kubectl", "apply", "-f", "-") // NOSONAR
 	cmd.Stdin = strings.NewReader(manifest)
 	_, err := Run(cmd)
 	return err

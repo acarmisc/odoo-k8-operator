@@ -54,7 +54,8 @@ func (v *OdooAddonValidator) ValidateDelete(_ context.Context, _ *OdooAddon) (ad
 }
 
 func validateOdooAddonSpec(addon *OdooAddon) error {
-	allowedSchemes := []string{"https://", "http://", "git@", "ssh://"}
+	// http:// is accepted on purpose for in-cluster git servers; the sync Job refuses to send credentials over it.
+	allowedSchemes := []string{"https://", "http://", "git@", "ssh://"} // NOSONAR
 	validURL := false
 	for _, prefix := range allowedSchemes {
 		if strings.HasPrefix(addon.Spec.GitUrl, prefix) {

@@ -1,3 +1,21 @@
 # More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
-# Ignore build and test binaries.
+# The Dockerfile copies only go.mod, go.sum, cmd/main.go, api/ and internal/.
+# Everything else is excluded to keep the build context small and cache-friendly.
+
+# Local build outputs and tooling
 bin/
+dist/
+*.out
+.claude/
+
+# VCS and CI metadata
+.git
+.github/
+.devcontainer/
+
+# Not needed to build the manager image
+test/
+config/
+hack/
+docs/
+*.md

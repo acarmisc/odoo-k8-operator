@@ -22,7 +22,6 @@ import (
 	"regexp"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -33,38 +32,30 @@ import (
 type OdooAddonValidator struct{}
 
 func (v *OdooAddonValidator) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&OdooAddon{}).
+	return ctrl.NewWebhookManagedBy(mgr, &OdooAddon{}).
 		WithValidator(v).
 		Complete()
 }
 
-var _ admission.CustomValidator = &OdooAddonValidator{}
+var _ admission.Validator[*OdooAddon] = &OdooAddonValidator{}
 
 var validAddonGitRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
 
-func (v *OdooAddonValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	addon, ok := obj.(*OdooAddon)
-	if !ok {
-		return nil, fmt.Errorf("expected OdooAddon but got %T", obj)
-	}
+func (v *OdooAddonValidator) ValidateCreate(_ context.Context, addon *OdooAddon) (admission.Warnings, error) {
 	return nil, validateOdooAddonSpec(addon)
 }
 
-func (v *OdooAddonValidator) ValidateUpdate(ctx context.Context, oldObj runtime.Object, newObj runtime.Object) (admission.Warnings, error) {
-	addon, ok := newObj.(*OdooAddon)
-	if !ok {
-		return nil, fmt.Errorf("expected OdooAddon but got %T", newObj)
-	}
+func (v *OdooAddonValidator) ValidateUpdate(_ context.Context, _, addon *OdooAddon) (admission.Warnings, error) {
 	return nil, validateOdooAddonSpec(addon)
 }
 
-func (v *OdooAddonValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *OdooAddonValidator) ValidateDelete(_ context.Context, _ *OdooAddon) (admission.Warnings, error) {
 	return nil, nil
 }
 
 func validateOdooAddonSpec(addon *OdooAddon) error {
-	allowedSchemes := []string{"https://", "http://", "git@", "ssh://"}
+	// http:// is accepted on purpose for in-cluster git servers; the sync Job refuses to send credentials over it.
+	allowedSchemes := []string{"https://", "http://", "git@", "ssh://"} // NOSONAR
 	validURL := false
 	for _, prefix := range allowedSchemes {
 		if strings.HasPrefix(addon.Spec.GitUrl, prefix) {

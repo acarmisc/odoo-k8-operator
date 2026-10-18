@@ -4,6 +4,8 @@
 resources:
 - bases/odoo.operator.io_odooinstances.yaml
 - bases/odoo.operator.io_odooaddons.yaml
+- bases/odoo.operator.io_odooupgrades.yaml
+- bases/odoo.operator.io_odoobackups.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

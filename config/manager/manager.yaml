@@ -63,6 +63,15 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+        env:
+        # The default install binds the ClusterRole with a RoleBinding in this namespace only,
+        # so watch only this namespace. To manage more namespaces set WATCH_NAMESPACES to a
+        # comma-separated list and create a RoleBinding in each one; set it to "" and use a
+        # ClusterRoleBinding to watch the whole cluster.
+        - name: WATCH_NAMESPACES
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         # TODO: Pin to immutable digest in production: ghcr.io/<org>/odoo-k8-operator@sha256:<digest>
         # Use IMG= variable with `make deploy IMG=...` to override at deploy time.
         image: controller:latest

@@ -1,0 +1,280 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: odoobackups.odoo.operator.io
+spec:
+  group: odoo.operator.io
+  names:
+    kind: OdooBackup
+    listKind: OdooBackupList
+    plural: odoobackups
+    singular: odoobackup
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.instanceRef.name
+      name: Instance
+      type: string
+    - jsonPath: .spec.schedule
+      name: Schedule
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              The spec of a one-shot backup is immutable. A scheduled backup may change, but it
+              cannot become one-shot again.
+            properties:
+              database:
+                description: Database to dump. Defaults to the instance's postgres.database.
+                pattern: ^[a-zA-Z0-9_.-]+$
+                type: string
+              destination:
+                description: Destination where the backup files are written.
+                properties:
+                  pvc:
+                    description: PVC writes to a PersistentVolumeClaim in the instance's
+                      namespace.
+                    properties:
+                      claimName:
+                        description: ClaimName is a PersistentVolumeClaim in the same
+                          namespace as the OdooBackup.
+                        minLength: 1
+                        type: string
+                      subPath:
+                        description: SubPath is a directory inside the claim. It is
+                          created by the mount, not by the operator.
+                        pattern: ^[a-zA-Z0-9._/-]+$
+                        type: string
+                    required:
+                    - claimName
+                    type: object
+                  s3:
+                    description: S3 uploads to an S3 or S3-compatible bucket (AWS,
+                      MinIO, ...).
+                    properties:
+                      bucket:
+                        minLength: 1
+                        type: string
+                      credentialsSecret:
+                        description: |-
+                          CredentialsSecret names a Secret in the same namespace with keys accessKeyID and
+                          secretAccessKey.
+                        minLength: 1
+                        type: string
+                      endpoint:
+                        description: Endpoint is the S3 API URL for non-AWS services,
+                          for example https://minio.example.com.
+                        type: string
+                      forcePathStyle:
+                        description: |-
+                          ForcePathStyle uses bucket/key URLs instead of virtual-hosted URLs. Most
+                          S3-compatible services need it.
+                        type: boolean
+                      prefix:
+                        description: Prefix is a key prefix inside the bucket.
+                        pattern: ^[a-zA-Z0-9._/-]+$
+                        type: string
+                      region:
+                        description: Region is passed as AWS_DEFAULT_REGION.
+                        type: string
+                    required:
+                    - bucket
+                    - credentialsSecret
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of pvc or s3 must be set
+                  rule: has(self.pvc) != has(self.s3)
+              includeFilestore:
+                default: true
+                description: IncludeFilestore also archives /var/lib/odoo/filestore/<database>.
+                  Defaults to true.
+                type: boolean
+              instanceRef:
+                description: |-
+                  InstanceRef names the OdooInstance (same namespace) whose database and filestore
+                  are backed up.
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              retention:
+                description: |-
+                  Retention keeps the newest N backups of this database at the destination and deletes
+                  older ones (the dump and its filestore archive). Unset keeps every backup.
+                format: int32
+                minimum: 1
+                type: integer
+              schedule:
+                description: |-
+                  Schedule is a 5-field cron expression (minute hour day-of-month month day-of-week).
+                  When set, the backup runs as a CronJob. Empty means a one-shot backup.
+                pattern: ^[^\s]+(\s+[^\s]+){4}$
+                type: string
+              scratchSize:
+                default: 10Gi
+                description: |-
+                  ScratchSize bounds the emptyDir that holds the dump before the upload to S3. It is
+                  not used for a PVC destination. Defaults to 10Gi.
+                pattern: ^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E|m)?$
+                type: string
+              suspend:
+                description: Suspend pauses a scheduled backup. Ignored for one-shot
+                  backups.
+                type: boolean
+              timeoutSeconds:
+                description: TimeoutSeconds bounds each backup pod (activeDeadlineSeconds).
+                  Defaults to 3600.
+                format: int64
+                maximum: 86400
+                minimum: 60
+                type: integer
+            required:
+            - destination
+            - instanceRef
+            type: object
+            x-kubernetes-validations:
+            - message: a one-shot OdooBackup is immutable; create a new OdooBackup,
+                or keep a schedule set
+              rule: self == oldSelf || (has(oldSelf.schedule) && has(self.schedule))
+          status:
+            description: OdooBackupStatus reports the state of a backup.
+            properties:
+              completionTime:
+                description: CompletionTime of the one-shot Job.
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions hold Succeeded, Progressing and Degraded.
+                  The reasons are listed in docs/backups.md.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              cronJobName:
+                description: CronJobName is the CronJob executing a scheduled backup.
+                type: string
+              jobName:
+                description: JobName is the Job executing a one-shot backup.
+                type: string
+              lastBackup:
+                description: |-
+                  LastBackup lists the files written by the last successful one-shot backup, for
+                  example "shop-20261017T120000Z.dump,shop-20261017T120000Z-filestore.tar.gz".
+                type: string
+              lastScheduleTime:
+                description: LastScheduleTime is copied from the CronJob status.
+                format: date-time
+                type: string
+              lastSuccessfulTime:
+                description: LastSuccessfulTime is copied from the CronJob status.
+                format: date-time
+                type: string
+              message:
+                description: Message carries the failure reason or the tail of the
+                  pod log.
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                description: Phase is one of Pending, Running, Succeeded, Failed (one-shot)
+                  or Scheduled (CronJob).
+                type: string
+              startTime:
+                description: StartTime of the one-shot Job.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

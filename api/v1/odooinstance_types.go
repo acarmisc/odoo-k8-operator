@@ -21,6 +21,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// +kubebuilder:validation:XValidation:rule="!has(self.replicas) || self.replicas <= 1 || (has(self.dataVolume) && has(self.dataVolume.accessMode) && self.dataVolume.accessMode == 'ReadWriteMany')",message="replicas > 1 requires dataVolume.accessMode=ReadWriteMany (the filestore must be shared by all pods)"
+// +kubebuilder:validation:XValidation:rule="!has(self.replicas) || self.replicas <= 1 || (has(self.addonsVolume) && has(self.addonsVolume.accessMode) && self.addonsVolume.accessMode == 'ReadWriteMany')",message="replicas > 1 requires addonsVolume.accessMode=ReadWriteMany"
 type OdooInstanceSpec struct {
 	Image string `json:"image,omitempty"`
 	// +kubebuilder:validation:Minimum=1
@@ -33,11 +35,81 @@ type OdooInstanceSpec struct {
 	Postgres  PostgresSpec                `json:"postgres,omitempty"`
 	Config    map[string]string           `json:"config,omitempty"`
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+	// AdminPasswordSecret names a Secret (key "password") holding Odoo's master
+	// (database manager) password. An init container renders it as admin_passwd into
+	// an in-memory config file that the web container reads. It never reaches the
+	// ConfigMap, and only the init container receives the environment variable.
+	AdminPasswordSecret string `json:"adminPasswordSecret,omitempty"`
+	// Upgrade makes the operator run `odoo -u <modules>` (via an OdooUpgrade) whenever the
+	// set of synced addon commits changes, and only roll the pods out once it succeeded.
+	Upgrade *UpgradeSpec `json:"upgrade,omitempty"`
+	// Initialize makes the operator create and initialise the database once, through an
+	// OdooUpgrade named <name>-init, before any pod is started. The Deployment stays at zero
+	// replicas until that succeeds. It is set at creation time only.
+	Initialize *InitializeSpec `json:"initialize,omitempty"`
+	// Cron moves the scheduled actions out of the web pods into a dedicated Deployment
+	// named <name>-cron. Unset or disabled, every pod runs cron as before.
+	Cron *CronSpec `json:"cron,omitempty"`
+}
+
+// CronSpec describes the dedicated cron Deployment of an OdooInstance. When enabled, the web
+// pods are rendered with max_cron_threads = 0 and a single "<name>-cron" pod runs the
+// scheduled actions, so scaling the web replicas does not multiply cron workers.
+type CronSpec struct {
+	// Enabled creates the cron Deployment and turns cron off in the web pods.
+	Enabled bool `json:"enabled,omitempty"`
+	// MaxCronThreads is the number of cron workers of the cron pod (--max-cron-threads).
+	// Defaults to 2.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=16
+	MaxCronThreads *int32 `json:"maxCronThreads,omitempty"`
+	// Resources of the cron pod. When unset, the web resources (spec.resources) or the
+	// defaults apply.
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// InitializeSpec describes the one-time database initialisation of an OdooInstance:
+// `odoo -d <database> -i <modules> --stop-after-init`, then the password of the Odoo
+// "admin" user is set through `odoo shell`.
+// +kubebuilder:validation:XValidation:rule="size(self.adminUserPasswordSecret) > 0",message="adminUserPasswordSecret is required"
+type InitializeSpec struct {
+	// Modules to install with -i. ["base"] is the minimal value and creates an empty Odoo database.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=100
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_]+$`
+	Modules []string `json:"modules"`
+	// WithDemo loads demo data. Defaults to false, which passes --without-demo=True.
+	WithDemo bool `json:"withDemo,omitempty"`
+	// AdminUserPasswordSecret names a Secret in the same namespace (key "password") whose
+	// value becomes the password of the Odoo user "admin". Required.
+	// +kubebuilder:validation:MinLength=1
+	AdminUserPasswordSecret string `json:"adminUserPasswordSecret"`
+	// TimeoutSeconds bounds the initialisation Job. Defaults to 1800.
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=86400
+	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
+}
+
+// UpgradeSpec configures automatic module upgrades for an OdooInstance.
+type UpgradeSpec struct {
+	// Modules to update with -u after addon commits change. Use ["all"] for every module.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=100
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_]+$`
+	Modules []string `json:"modules"`
+	// TimeoutSeconds for each generated OdooUpgrade. Defaults to 1800.
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=86400
+	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
 }
 
 type AddonVolumeSpec struct {
 	StorageClass *string `json:"storageClass,omitempty"`
 	Size         string  `json:"size,omitempty"`
+	// AccessMode of the PVC. Defaults to ReadWriteOnce; use ReadWriteMany when
+	// running more than one replica.
+	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany
+	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
 }
 
 // DataVolumeSpec configures persistent storage for Odoo's data_dir
@@ -47,6 +119,13 @@ type AddonVolumeSpec struct {
 type DataVolumeSpec struct {
 	StorageClass *string `json:"storageClass,omitempty"`
 	Size         string  `json:"size,omitempty"`
+	// AccessMode of the PVC. Defaults to ReadWriteOnce; use ReadWriteMany when
+	// running more than one replica.
+	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany
+	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
+	// RetainOnDelete keeps the data PVC (filestore) when the OdooInstance is
+	// deleted. Defaults to true; set to false to garbage-collect it with the instance.
+	RetainOnDelete *bool `json:"retainOnDelete,omitempty"`
 }
 
 type PostgresSpec struct {
@@ -64,6 +143,27 @@ type OdooInstanceStatus struct {
 	Phase              string   `json:"phase,omitempty"`
 	AddonPaths         []string `json:"addonPaths,omitempty"`
 	ObservedGeneration int64    `json:"observedGeneration,omitempty"`
+	// Conditions hold Ready, Progressing and Degraded, and CronReady when spec.cron is enabled.
+	// The reasons are listed in docs/odooinstance.md.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +patchStrategy=merge
+	// +patchMergeKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// Message is a human summary of the current state, e.g. the reason for Degraded.
+	Message string `json:"message,omitempty"`
+	// Initialized is true once the database initialisation of spec.initialize has
+	// succeeded, or was skipped because the instance already served traffic.
+	Initialized bool `json:"initialized,omitempty"`
+	// InitUpgrade names the OdooUpgrade doing the database initialisation, while it runs
+	// or after it failed.
+	InitUpgrade string `json:"initUpgrade,omitempty"`
+	// AppliedAddonsHash is the addons hash the running pods were rolled out with. With
+	// spec.upgrade set it only advances after the matching OdooUpgrade succeeded.
+	AppliedAddonsHash string `json:"appliedAddonsHash,omitempty"`
+	// ActiveUpgrade names the OdooUpgrade currently gating a rollout, if any.
+	ActiveUpgrade string `json:"activeUpgrade,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -77,6 +177,7 @@ type OdooInstance struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +kubebuilder:validation:XValidation:rule="!has(self.initialize) || has(oldSelf.initialize)",message="spec.initialize cannot be added to an existing OdooInstance: it would re-initialise a live database"
 	Spec   OdooInstanceSpec   `json:"spec,omitempty"`
 	Status OdooInstanceStatus `json:"status,omitempty"`
 }
@@ -90,5 +191,5 @@ type OdooInstanceList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&OdooInstance{}, &OdooInstanceList{})
+	register(&OdooInstance{}, &OdooInstanceList{})
 }

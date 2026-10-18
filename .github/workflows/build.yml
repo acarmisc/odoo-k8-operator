@@ -1,54 +1,182 @@
 name: Build and Push Operator
 
 on:
+  # Manual runs build and scan but never log in, push or sign (a dry run of the release pipeline).
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Release: version without the leading v (for example 0.1.0 or 0.2.0-rc.1). Publishes and signs the image, then creates the tag and the GitHub Release from CHANGELOG.md. Leave empty for a dry run (build and scan only)."
+        required: false
+        type: string
+        default: ""
   push:
     branches: [ "main" ]
     tags: [ 'v*' ]
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
-  build-and-push:
+  build:
+    name: Build (scan on non-PR events; publish and sign on push events only)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # packages: write to push to GHCR; id-token: write for keyless cosign signing.
+    # Both are only exercised on non-PR events (see the `if:` guards below).
     permissions:
-      contents: read
+      contents: write   # only used to create the tag and the release when release_version is set
       packages: write
+      id-token: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/checkout@v5
         with:
-          go-version: '1.24'
-          cache: true
+          persist-credentials: false
+
+      # Publishing happens on push events and on manual runs with release_version set.
+      - name: Decide whether to publish and validate the release version
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          if [ -n "$RELEASE_VERSION" ]; then
+            if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              echo "::error::release_version must look like 1.2.3 or 1.2.3-rc.1, got: $RELEASE_VERSION"; exit 1
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/v$RELEASE_VERSION" >/dev/null 2>&1; then
+              echo "::error::tag v$RELEASE_VERSION already exists"; exit 1
+            fi
+            if ! grep -q "^## \[$RELEASE_VERSION\]" CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no '## [$RELEASE_VERSION]' section"; exit 1
+            fi
+          fi
+          if [ "$EVENT" = "push" ] || [ -n "$RELEASE_VERSION" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: ${{ env.PLATFORMS }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Log in to the Container registry ${{ env.REGISTRY }}
-        uses: docker/login-action@v3
+      # Only push events (branch/tag) publish. Pull requests (including from forks) and manual
+      # dry runs never log in, push or sign.
+      - name: Log in to the container registry
+        if: steps.mode.outputs.publish == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+          tags: |
+            type=sha
+            type=ref,event=branch,enable={{is_default_branch}}
+            type=semver,pattern=v{{version}},enable=${{ inputs.release_version == '' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ inputs.release_version == '' }}
+            type=semver,pattern=v{{version}},value=v${{ inputs.release_version }},enable=${{ inputs.release_version != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ inputs.release_version }},enable=${{ inputs.release_version != '' && !contains(inputs.release_version, '-') }}
+            type=raw,value=latest,enable=${{ (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')) || (inputs.release_version != '' && !contains(inputs.release_version, '-')) }}
+
+      # Build the amd64 image locally first so Trivy can gate the publish.
+      - name: Build amd64 image for scanning
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ startsWith(github.ref, 'refs/tags/v') && format('{0}/{1}:latest', env.REGISTRY, env.IMAGE_NAME) || '' }}
-          # Se il tag è una versione (es. v0.0.1), lo aggiungiamo anche
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.description=Odoo Kubernetes Operator
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: odoo-k8-operator:scan
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=scan
+          cache-to: type=gha,mode=max,scope=scan
+
+      - name: Scan image with Trivy
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: odoo-k8-operator:scan
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          format: table
+
+      - name: Build and push multi-arch image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: ${{ steps.mode.outputs.publish == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=multiarch
+          cache-to: type=gha,mode=max,scope=multiarch
+
+      - name: Install cosign
+        if: steps.mode.outputs.publish == 'true'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      # Sign by digest so every tag pointing at the image is covered.
+      - name: Sign image with cosign (keyless)
+        if: steps.mode.outputs.publish == 'true'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # Only after the image was built, scanned, pushed and signed: tag the commit and publish the
+      # GitHub Release with the CHANGELOG notes.
+      - name: Create the tag and the GitHub Release
+        if: inputs.release_version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          awk -v v="$RELEASE_VERSION" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git tag -a "v$RELEASE_VERSION" -m "v$RELEASE_VERSION" "$GITHUB_SHA"
+          git push origin "v$RELEASE_VERSION"
+          flags=""
+          if [[ "$RELEASE_VERSION" == *-* ]]; then flags="--prerelease"; fi
+          gh release create "v$RELEASE_VERSION" --title "v$RELEASE_VERSION" --notes-file release-notes.md --verify-tag $flags

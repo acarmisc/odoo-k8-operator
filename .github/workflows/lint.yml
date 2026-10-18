@@ -1,23 +1,39 @@
 name: Lint
 
 on:
+  workflow_dispatch:
   push:
+    branches: [ "main" ]
+    tags: [ 'v*' ]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   lint:
-    name: Run on Ubuntu
+    name: golangci-lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Clone the code
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Checkout repository
+        uses: actions/checkout@v5
         with:
-          go-version-file: go.mod
+          persist-credentials: false
 
-      - name: Run linter
-        uses: golangci/golangci-lint-action@v8
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          version: v2.1.0
+          go-version: '1.26.x'
+          check-latest: true
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          # Keep in sync with GOLANGCI_LINT_VERSION in the Makefile.
+          version: v2.15.0

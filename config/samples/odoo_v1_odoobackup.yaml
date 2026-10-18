@@ -1,0 +1,16 @@
+apiVersion: odoo.operator.io/v1
+kind: OdooBackup
+metadata:
+  labels:
+    app.kubernetes.io/name: odoo-k8-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: odoobackup-sample
+spec:
+  instanceRef:
+    name: odooinstance-sample
+  includeFilestore: true
+  destination:
+    pvc:
+      claimName: backups
+      subPath: odoo-sample
+  retention: 7

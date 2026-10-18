@@ -1,4 +1,4 @@
-apiVersion: odoo.odoo.io/v1
+apiVersion: odoo.operator.io/v1
 kind: OdooAddon
 metadata:
   labels:
@@ -6,4 +6,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: odooaddon-sample
 spec:
-  # TODO(user): Add fields here
+  gitUrl: https://github.com/your-org/odoo-addons.git
+  # Branch, tag or full 40-char commit SHA (pin a SHA in production).
+  gitRef: main
+  # Secret keys: token (+ optional username) for HTTPS; ssh-privatekey + known_hosts for SSH.
+  gitSecretRef:
+    name: odoo-addons-git
+  instanceRef:
+    name: odooinstance-sample

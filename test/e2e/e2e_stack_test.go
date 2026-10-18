@@ -369,9 +369,14 @@ func listAddonsDir() (string, error) {
 	return utils.Output(kubectlNS("exec", "deploy/"+instanceName, "--", "ls", "-l", addonsDir))
 }
 
-// kubectlNS builds a kubectl command in the scenario namespace.
+// kubectlNS builds a kubectl command in the scenario namespace. The namespace flag goes right after
+// the verb: appended at the end it would land after "--" in "kubectl exec" and become part of the
+// command that runs in the container.
 func kubectlNS(args ...string) *exec.Cmd {
-	full := append(append([]string{}, args...), "-n", namespace)
+	if len(args) == 0 {
+		return exec.Command(kubectlBin, "-n", namespace)
+	}
+	full := append([]string{args[0], "-n", namespace}, args[1:]...)
 	return exec.Command(kubectlBin, full...)
 }
 

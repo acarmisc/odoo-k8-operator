@@ -4,7 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change the API).
 
-## [Unreleased]
+## [0.1.1] - 2026-10-18
+
+**Upgrade from 0.1.0 as soon as possible if you set `spec.adminPasswordSecret`:** in 0.1.0 the web pods crashed
+on Odoo 19 (see "Fixed"). Web pods roll once on this upgrade when `adminPasswordSecret` is set and, with
+`ReadWriteOnce` volumes, because the pod affinity changed.
+
+This release is the first one verified end to end with real Odoo 19 and PostgreSQL 17 on kind: database
+initialisation, admin login, dedicated cron pod, addon sync and install, upgrade gate, backup to a PVC and
+the cleanup paths all run in CI now (`test/e2e/e2e_stack_test.go`).
 
 ### Added
 - End-to-end test of the full stack on kind: PostgreSQL with TLS, database initialisation, login checks, dedicated cron pod, addon sync and install, upgrade gate, PVC backup and cleanup paths (`test/e2e/e2e_stack_test.go`). Diagnostics are dumped on failure.

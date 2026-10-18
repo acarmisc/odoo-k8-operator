@@ -134,7 +134,47 @@ A sync Job created by the local process still runs in the cluster, so the cluste
 
 ## End-to-end tests on kind
 
-The end-to-end suite is in `test/e2e`. It has one spec: the manager pod runs. It does not create an OdooInstance, so it is a deployment smoke test, not a reconcile test.
+The end-to-end suite is in `test/e2e`. It has two parts, both run by `make test-e2e` in the namespace `odoo-k8-operator-system`:
+
+- **Manager**: the controller-manager pod runs, and the three controllers start and create the objects of an OdooInstance.
+- **Full stack** (`e2e_stack_test.go`): a real PostgreSQL and the `odoo:19.0` image run on the cluster. The steps are Ordered, so the first failing step ends the scenario.
+
+### Full-stack scenario
+
+| # | Step | What is asserted |
+|---|---|---|
+| 1 | PostgreSQL | A `postgres:17` Deployment with TLS (self-signed certificate made by an init container, `sslmode=require`) and the role `odoo`, with random passwords from Secrets. |
+| 2 | OdooInstance | `e2e` is created with `spec.initialize` (`base`, login password from the `odoo-login` Secret). |
+| 3 | Initialisation | OdooUpgrade `e2e-init` succeeds, `status.initialized` is true, the phase is `Running` and `ready` is true. |
+| 4 | HTTP and login | `GET /web/login` returns 200 in a curl pod. Authentication as `admin` works with the generated password and fails with `admin`. |
+| 5 | Cron | `spec.cron.enabled` creates Deployment `e2e-cron`, the `CronReady` condition is `True`, `odoo.conf` has `max_cron_threads = 0`, and the web Service endpoints are not cron pods. |
+| 6 | Addon | OdooAddon `e2e-probe` syncs `e2e-addons/` from this repository at `E2E_GIT_SHA`. Phase `Synced`, modules `[e2e_probe]`, commit, `status.addonPaths`, and the symlink in the web pod. |
+| 7 | Module install | OdooUpgrade `e2e-install` (`installModules: [e2e_probe]`) succeeds, and `ir_module_module` shows the module as `installed`. |
+| 8 | Upgrade gate | `spec.upgrade` is set and the instance stays `Running` and ready. Deeper gate flows are covered by envtest. |
+| 9 | Backup | OdooBackup `e2e-backup` to PVC `e2e-backups` succeeds. A read-only pod lists a `e2e-*.dump` file. |
+| 10 | Addon cleanup | Deleting OdooAddon `e2e-probe` removes the object (finalizer) and the symlink from the web pod. |
+| 11 | Instance delete | Deleting OdooInstance `e2e` keeps PVC `e2e-data` (`retainOnDelete`). The cleanup removes it. |
+
+Notes for the scenario:
+
+- `E2E_GIT_SHA` must be a commit that is pushed to `github.com/acarmisc/odoo-k8-operator`, because the sync Job fetches it by SHA. Without it, step 6 and the steps after it are skipped with a message. The workflow sets it to the pull request head SHA, or to `github.sha` on other events.
+- The addon sources are in `e2e-addons/` at the repository root, not under `test/`, because `OdooAddon.spec.addonPath` must be a single folder name at the root of the repository.
+- Pods of the scenario use the `restricted` Pod Security profile of the namespace, like the operator.
+- Timeouts are upper bounds of each step. Image pulls dominate the first step after the instance is created (about 1.5 GB for `odoo:19.0`).
+
+### Debugging a failed run
+
+The `AfterEach` hook of the scenario prints, to the Ginkgo output of the failed step: the pods, Jobs, Deployments, Services, PVCs and EndpointSlices, the events, the YAML of the OdooInstance, OdooAddon, OdooUpgrade and OdooBackup objects, the ConfigMap `e2e-config`, `kubectl describe` of the pods and Jobs, the operator logs, and the logs of every pod (all containers, including the init containers of the PostgreSQL and the upgrade Jobs). Secrets are not printed.
+
+The `Manager` container removes the operator, the CRDs and the namespace in its `AfterAll`, also after a failure, so the diagnostics in the CI log are the record of a failed run. In CI, `kind export logs` runs after a failure and keeps the node and container logs.
+
+To debug locally, run `make setup-test-e2e`, then `KIND_CLUSTER=<name> go test ./test/e2e/ -v -ginkgo.v -timeout 40m -ginkgo.focus "full stack"`. Stop the run with Ctrl-C after the failure and inspect the namespace while it still exists, for example:
+
+```bash
+kubectl -n odoo-k8-operator-system get odooinstance,odooaddon,odooupgrade,odoobackup
+kubectl -n odoo-k8-operator-system describe pod -l app=odoo
+kubectl -n odoo-k8-operator-system logs job/e2e-init-run
+```
 
 Prerequisites: Docker, `kind` and `kubectl` on your `PATH`.
 

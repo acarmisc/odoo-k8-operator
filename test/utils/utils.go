@@ -60,6 +60,32 @@ func Run(cmd *exec.Cmd) (string, error) {
 	return string(output), nil
 }
 
+// Output runs cmd in the project directory and returns its trimmed standard output.
+// Standard error is kept out of the result, so kubectl warnings cannot corrupt values
+// that are parsed from the output. On failure, standard error is part of the error.
+func Output(cmd *exec.Cmd) (string, error) {
+	dir, _ := GetProjectDir()
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GO111MODULE=on")
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return strings.TrimSpace(stdout.String()), fmt.Errorf("%q failed: %w: %s",
+			strings.Join(cmd.Args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// ApplyManifest pipes a manifest (YAML or JSON) to kubectl apply.
+func ApplyManifest(manifest string) error {
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	_, err := Run(cmd)
+	return err
+}
+
 // InstallPrometheusOperator installs the prometheus Operator to be used to export the enabled metrics.
 func InstallPrometheusOperator() error {
 	url := fmt.Sprintf(prometheusOperatorURL, prometheusOperatorVersion)

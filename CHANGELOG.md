@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- End-to-end test of the full stack on kind: PostgreSQL with TLS, database initialisation, login checks, dedicated cron pod, addon sync and install, upgrade gate, PVC backup and cleanup paths (`test/e2e/e2e_stack_test.go`). Diagnostics are dumped on failure.
+
 ### Fixed
 - Rollouts with `ReadWriteOnce` volumes could stall on a Multi-Attach error. The cron pod was pinned to a web
   pod's node, but the web pods had no affinity to the cron pod, so a web rollout could land on another node

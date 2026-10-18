@@ -160,4 +160,7 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 		})
 	})
+
+	// Runs after the quick checks above, in the same Ordered container, while the manager is deployed.
+	describeFullStack()
 })

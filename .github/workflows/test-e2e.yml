@@ -26,7 +26,7 @@ jobs:
   test-e2e:
     name: e2e on kind
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -51,6 +51,9 @@ jobs:
       - name: Run e2e tests
         env:
           CERT_MANAGER_INSTALL_SKIP: "true"
+          # The addon step syncs e2e-addons/ from GitHub at this commit, so it must be pushed.
+          # For pull_request events github.sha is a merge commit that is not on GitHub: use the head.
+          E2E_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: make test-e2e
 
       - name: Export kind logs on failure

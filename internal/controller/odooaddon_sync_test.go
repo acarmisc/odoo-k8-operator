@@ -48,6 +48,8 @@ const (
 	testRelRootLine      = "RELROOT=/mnt/odoo/addons/.releases/geox-theme"
 	testRevParseLast     = "git -C /tmp/repo rev-parse HEAD\n"
 	testHTTPSAuthHdr     = `http.extraHeader=Authorization: Basic $AUTH`
+	// testManifestCheck is the single-module guard, for the geox_theme module.
+	testManifestCheck = `[ -f /tmp/repo/__manifest__.py ] || { echo "no __manifest__.py at the repository root of geox_theme" >&2; exit 1; }`
 )
 
 // syncScriptCase is one generated-script scenario: the spec plus fragments that must
@@ -91,8 +93,9 @@ func syncScriptCases() []syncScriptCase {
 				"publish geox_theme /tmp/repo\n",
 				`cp -a "$src" "$REL/.$name.partial"`,
 				`if [ ! -d "$REL/$name" ]; then`,
+				testManifestCheck,
 			},
-			notContains: []string{"git init", "FETCH_HEAD", "__manifest__.py", "GIT_SSH_COMMAND"},
+			notContains: []string{"git init", "FETCH_HEAD", "GIT_SSH_COMMAND"},
 		},
 		{
 			name: "single addon, commit SHA, https token",
@@ -107,6 +110,7 @@ func syncScriptCases() []syncScriptCase {
 				`git -c "http.extraHeader=Authorization: Basic $AUTH" -C /tmp/repo fetch --depth 1 origin "$GIT_REF"`,
 				"git -C /tmp/repo checkout --detach FETCH_HEAD",
 				"publish geox_theme /tmp/repo\n",
+				testManifestCheck,
 			},
 			notContains: []string{"--branch", "git clone"},
 		},
@@ -150,7 +154,10 @@ func syncScriptCases() []syncScriptCase {
 				s.Auth = authSSH
 				s.SecretName = testSecretName
 			}),
-			contains:    []string{`git clone --depth 1 --branch "$GIT_REF" "$GIT_URL" /tmp/repo`},
+			contains: []string{
+				`git clone --depth 1 --branch "$GIT_REF" "$GIT_URL" /tmp/repo`,
+				testManifestCheck,
+			},
 			notContains: []string{testHTTPSAuthHdr, "GIT_TOKEN", "ssh -i"},
 		},
 	}

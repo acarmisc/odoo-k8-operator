@@ -283,6 +283,32 @@ func odooPodSpec(instance *odoov1.OdooInstance, container corev1.Container, affi
 	}
 }
 
+// needsColocation reports whether the data or addons volume is not ReadWriteMany. Such a
+// volume attaches to one node at a time, so every pod of the instance must share a node.
+func needsColocation(spec *odoov1.OdooInstanceSpec) bool {
+	return spec.Data.AccessMode != corev1.ReadWriteMany || spec.Addons.AccessMode != corev1.ReadWriteMany
+}
+
+// colocationAffinity is the pod affinity of the web and cron pod templates when a volume is not
+// ReadWriteMany. Both templates carry the same required term: a pod must run on a node that
+// already runs a pod labelled instance=<name>. The first pod of the instance matches its own
+// labels, so the scheduler places it freely. Every later web or cron pod joins that node, so a
+// rollout of one template can never land on a node the other pod does not share. It is nil for
+// ReadWriteMany volumes, where any node is fine.
+func colocationAffinity(instanceName string, spec *odoov1.OdooInstanceSpec) *corev1.Affinity {
+	if !needsColocation(spec) {
+		return nil
+	}
+	return &corev1.Affinity{
+		PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{labelInstance: instanceName}},
+				TopologyKey:   corev1.LabelHostname,
+			}},
+		},
+	}
+}
+
 // buildPodTemplate renders the full web pod template. Labels, annotations and the
 // security posture are all set here so the Deployment is fully described by
 // the instance spec and the rollout hashes.
@@ -305,6 +331,6 @@ func buildPodTemplate(instance *odoov1.OdooInstance, hashes rolloutHashes) corev
 			Labels:      podLabels(instance.Name),
 			Annotations: podAnnotations(hashes),
 		},
-		Spec: odooPodSpec(instance, container, nil),
+		Spec: odooPodSpec(instance, container, colocationAffinity(instance.Name, &instance.Spec)),
 	}
 }

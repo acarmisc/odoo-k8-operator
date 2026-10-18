@@ -23,6 +23,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	odoov1 "github.com/odoo-k8s/odoo-k8-operator/api/v1"
@@ -190,6 +191,84 @@ func TestOdooProbes(t *testing.T) {
 	check("startup", startup, 10, 30)
 	check("readiness", readiness, 10, 3)
 	check("liveness", liveness, 20, 3)
+}
+
+func TestColocationAffinity(t *testing.T) {
+	tests := []struct {
+		name       string
+		data, addr corev1.PersistentVolumeAccessMode
+		wantTerm   bool
+	}{
+		{name: "both unset is RWO", wantTerm: true},
+		{name: "both RWO", data: cronTestRWOAccess, addr: cronTestRWOAccess, wantTerm: true},
+		{name: "RWO data, RWX addons", data: cronTestRWOAccess, addr: cronTestRWXAccess, wantTerm: true},
+		{name: "RWX data, RWO addons", data: cronTestRWXAccess, addr: cronTestRWOAccess, wantTerm: true},
+		{name: "both RWX needs no affinity", data: cronTestRWXAccess, addr: cronTestRWXAccess, wantTerm: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := odoov1.OdooInstanceSpec{
+				Data:   odoov1.DataVolumeSpec{AccessMode: tc.data},
+				Addons: odoov1.AddonVolumeSpec{AccessMode: tc.addr},
+			}
+			aff := colocationAffinity(testInstanceName, &spec)
+			if !tc.wantTerm {
+				if aff != nil {
+					t.Fatalf("colocationAffinity() = %+v, want nil for ReadWriteMany volumes", aff)
+				}
+				return
+			}
+			if aff == nil || aff.PodAffinity == nil {
+				t.Fatalf("colocationAffinity() has no pod affinity")
+			}
+			terms := aff.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			if len(terms) != 1 {
+				t.Fatalf("required affinity terms = %d, want 1", len(terms))
+			}
+			if terms[0].TopologyKey != corev1.LabelHostname {
+				t.Errorf("topologyKey = %q, want %q", terms[0].TopologyKey, corev1.LabelHostname)
+			}
+			want := map[string]string{labelInstance: testInstanceName}
+			if !reflect.DeepEqual(terms[0].LabelSelector.MatchLabels, want) {
+				t.Errorf("affinity selector = %v, want %v", terms[0].LabelSelector.MatchLabels, want)
+			}
+		})
+	}
+}
+
+// Both templates must carry the same required term, and each template's own labels must match
+// it. A pod that matches its own term may start when no other pod matches, which is how the
+// first pod of an instance gets scheduled.
+func TestColocationSelectorMatchesBothTemplates(t *testing.T) {
+	instance := cronTestInstanceObj(func(i *odoov1.OdooInstance) { i.Spec.Cron = cronTestSpec() })
+	templates := []struct {
+		name string
+		tmpl corev1.PodTemplateSpec
+	}{
+		{name: "web", tmpl: buildPodTemplate(instance, cronTestHashes())},
+		{name: "cron", tmpl: buildCronPodTemplate(instance, cronTestHashes())},
+	}
+	for _, tc := range templates {
+		if tc.tmpl.Spec.Affinity == nil || tc.tmpl.Spec.Affinity.PodAffinity == nil {
+			t.Fatalf("%s pod template has no pod affinity for RWO volumes", tc.name)
+		}
+	}
+	if !reflect.DeepEqual(templates[0].tmpl.Spec.Affinity, templates[1].tmpl.Spec.Affinity) {
+		t.Errorf("web affinity %+v differs from cron affinity %+v",
+			templates[0].tmpl.Spec.Affinity, templates[1].tmpl.Spec.Affinity)
+	}
+
+	term := templates[0].tmpl.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
+	selector := labels.SelectorFromSet(term.LabelSelector.MatchLabels)
+	for _, tc := range templates {
+		if !selector.Matches(labels.Set(tc.tmpl.Labels)) {
+			t.Errorf("%s pod labels %v do not match affinity selector %v", tc.name, tc.tmpl.Labels, selector)
+		}
+	}
+	// The web Deployment selector stays app=odoo, so the Service and PDB are unaffected.
+	if !labels.SelectorFromSet(selectorLabels(cronTestInstance)).Matches(labels.Set(templates[0].tmpl.Labels)) {
+		t.Errorf("web pod labels no longer match the web selector")
+	}
 }
 
 func TestBuildPodTemplateHardening(t *testing.T) {

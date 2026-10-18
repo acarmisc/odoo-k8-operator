@@ -149,11 +149,11 @@ odoo-addons/              <- gitUrl
 
 With `addonPath: addons`, the modules are the subfolders of `addons/`. `addonPath` is one folder name. `addons/custom` is rejected.
 
-If no subfolder contains `__manifest__.py`, the sync fails with `no Odoo modules found in <dir>`.
+If no subfolder contains `__manifest__.py`, the sync fails with `no Odoo modules found in <dir>`. This check runs before any change to the addons volume, as does the conflict check.
 
 ### Single-module (`singleAddon: true`)
 
-The whole repository is the module. Its root folder becomes `moduleName` in the addons volume. `addonPath` is ignored in this mode. The operator does not check for `__manifest__.py` in this mode, so an error is found only when Odoo loads the module. The module name reported in `status.modules` is `moduleName`.
+The whole repository is the module. Its root folder becomes `moduleName` in the addons volume. `addonPath` is ignored in this mode. The operator checks that `__manifest__.py` exists at the repository root, after the clone and before it changes the addons volume. If it is missing, the sync fails with `no __manifest__.py at the repository root of <moduleName>` and the volume is left as it was. The module name reported in `status.modules` is `moduleName`.
 
 ```text
 geox-theme/              <- gitUrl (repository root is the module)

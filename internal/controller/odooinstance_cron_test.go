@@ -204,49 +204,6 @@ func TestCronReplicas(t *testing.T) {
 	}
 }
 
-func TestCronAffinity(t *testing.T) {
-	tests := []struct {
-		name       string
-		data, addr corev1.PersistentVolumeAccessMode
-		wantTerm   bool
-	}{
-		{name: "both unset is RWO", wantTerm: true},
-		{name: "both RWO", data: cronTestRWOAccess, addr: cronTestRWOAccess, wantTerm: true},
-		{name: "RWO data, RWX addons", data: cronTestRWOAccess, addr: cronTestRWXAccess, wantTerm: true},
-		{name: "RWX data, RWO addons", data: cronTestRWXAccess, addr: cronTestRWOAccess, wantTerm: true},
-		{name: "both RWX needs no affinity", data: cronTestRWXAccess, addr: cronTestRWXAccess, wantTerm: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			spec := odoov1.OdooInstanceSpec{
-				Data:   odoov1.DataVolumeSpec{AccessMode: tc.data},
-				Addons: odoov1.AddonVolumeSpec{AccessMode: tc.addr},
-			}
-			aff := cronAffinity(cronTestInstance, &spec)
-			if !tc.wantTerm {
-				if aff != nil {
-					t.Fatalf("cronAffinity() = %+v, want nil for ReadWriteMany volumes", aff)
-				}
-				return
-			}
-			if aff == nil || aff.PodAffinity == nil {
-				t.Fatalf("cronAffinity() has no pod affinity")
-			}
-			terms := aff.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
-			if len(terms) != 1 {
-				t.Fatalf("required affinity terms = %d, want 1", len(terms))
-			}
-			if terms[0].TopologyKey != corev1.LabelHostname {
-				t.Errorf("topologyKey = %q, want %q", terms[0].TopologyKey, corev1.LabelHostname)
-			}
-			if !reflect.DeepEqual(terms[0].LabelSelector.MatchLabels, selectorLabels(cronTestInstance)) {
-				t.Errorf("affinity selector = %v, want web selector %v",
-					terms[0].LabelSelector.MatchLabels, selectorLabels(cronTestInstance))
-			}
-		})
-	}
-}
-
 func TestBuildCronPodTemplate(t *testing.T) {
 	instance := cronTestInstanceObj(func(i *odoov1.OdooInstance) {
 		i.Spec.Cron = cronTestSpec()
@@ -311,6 +268,9 @@ func TestCronPodTemplateAffinityFollowsVolumes(t *testing.T) {
 	})
 	if got := buildCronPodTemplate(rwx, cronTestHashes()).Spec.Affinity; got != nil {
 		t.Errorf("ReadWriteMany cron pod has affinity %+v, want none", got)
+	}
+	if got := buildPodTemplate(rwx, cronTestHashes()).Spec.Affinity; got != nil {
+		t.Errorf("ReadWriteMany web pod has affinity %+v, want none", got)
 	}
 }
 

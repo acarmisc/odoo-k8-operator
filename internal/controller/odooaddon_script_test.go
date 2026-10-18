@@ -96,6 +96,38 @@ func TestBuildSyncScriptManifestFragments(t *testing.T) {
 	}
 }
 
+// Single-module mode must refuse a repository without __manifest__.py at its root before the
+// first write to the addons volume (the first write is creating the release directory).
+func TestBuildSyncScriptManifestCheckPrecedesWrites(t *testing.T) {
+	for _, tc := range syncScriptCases() {
+		if !tc.spec.SingleAddon {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			inOrder(t, buildSyncScript(tc.spec),
+				testManifestCheck,
+				`mkdir -p "$REL"`,
+				`ln -sfn "$REL/$name" "$ADDONS/.$name.tmp"`,
+			)
+		})
+	}
+}
+
+// Multi-module mode finds its modules by their manifests, so the single-module guard must not
+// appear there.
+func TestBuildSyncScriptNoManifestCheckInMultiModule(t *testing.T) {
+	for _, tc := range syncScriptCases() {
+		if tc.spec.SingleAddon {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.Contains(buildSyncScript(tc.spec), "at the repository root of") {
+				t.Errorf("multi-module script must not carry the single-module manifest guard")
+			}
+		})
+	}
+}
+
 func TestBuildSyncScriptConflictMessage(t *testing.T) {
 	script := buildSyncScript(testSpec(nil))
 	want := `echo "module $name is already provided by addon $other" >&2`

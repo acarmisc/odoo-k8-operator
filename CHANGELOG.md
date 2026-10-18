@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change the API).
 
+## [Unreleased]
+
+### Fixed
+- Rollouts with `ReadWriteOnce` volumes could stall on a Multi-Attach error. The cron pod was pinned to a web
+  pod's node, but the web pods had no affinity to the cron pod, so a web rollout could land on another node
+  while the cron pod still held the volume. The web and cron pod templates now share one required pod affinity
+  on `instance: <name>`, so they always run on the same node. The web pods roll once when you upgrade. The
+  web Deployment selector is unchanged.
+- OdooAddon with `singleAddon: true` fails with `no __manifest__.py at the repository root of <moduleName>` when
+  the repository has no `__manifest__.py` at its root. Before, the sync published the repository as a module that
+  Odoo could not load. The check runs before any change to the addons volume.
+
 ## [0.1.0] - 2026-10-17
 
 First release after a production-readiness review (see [docs/audit-2026-10.md](docs/audit-2026-10.md)).

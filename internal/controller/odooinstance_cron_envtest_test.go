@@ -35,15 +35,16 @@ import (
 )
 
 const (
-	cronEnvEnable  = "cron-env-enable"
-	cronEnvDisable = "cron-env-disable"
-	cronEnvStatus  = "cron-env-status"
-	cronEnvReject  = "cron-env-reject"
-	cronEnvAbsent  = "cron-env-absent"
-	cronEnvInit    = "cron-env-init"
-	cronEnvIso     = "cron-env-iso"
-	cronEnvSecret  = "cron-env-admin-pw"
-	cronEnvThreads = int32(3)
+	cronEnvEnable   = "cron-env-enable"
+	cronEnvDisable  = "cron-env-disable"
+	cronEnvStatus   = "cron-env-status"
+	cronEnvReject   = "cron-env-reject"
+	cronEnvAbsent   = "cron-env-absent"
+	cronEnvInit     = "cron-env-init"
+	cronEnvIso      = "cron-env-iso"
+	cronEnvAffinity = "cron-env-affinity"
+	cronEnvSecret   = "cron-env-admin-pw"
+	cronEnvThreads  = int32(3)
 )
 
 // cronEnvEnabled is an enabled cron spec with cronEnvThreads workers.
@@ -110,8 +111,8 @@ var _ = Describe("OdooInstance dedicated cron Deployment", func() {
 			Expect(cron.Spec.Template.Annotations).To(Equal(web.Spec.Template.Annotations))
 			Expect(cron.Spec.Template.Spec.Volumes).To(HaveLen(len(web.Spec.Template.Spec.Volumes)))
 
-			// The default volumes are ReadWriteOnce, so the cron pod must share a node with a web pod.
-			Expect(cron.Spec.Template.Spec.Affinity).NotTo(BeNil())
+			// The default volumes are ReadWriteOnce, so the cron and web pods must share a node.
+			Expect(cron.Spec.Template.Spec.Affinity).To(Equal(web.Spec.Template.Spec.Affinity))
 			Expect(cron.Spec.Template.Spec.Affinity.PodAffinity).NotTo(BeNil())
 
 			// The web Service must never select a cron pod.
@@ -186,6 +187,39 @@ var _ = Describe("OdooInstance dedicated cron Deployment", func() {
 
 			// The web Deployment has no ready pods, so the instance is still not Ready.
 			Expect(fetchInstance(ctx, cronEnvStatus).Status.Ready).To(BeFalse())
+		})
+	})
+
+	Context("pod affinity with ReadWriteOnce volumes", func() {
+		It("gives the web and cron templates the same colocation term, and removes it when both volumes are ReadWriteMany", func() {
+			ctx := context.Background()
+			createInstance(ctx, cronEnvAffinity, func(i *odoov1.OdooInstance) {
+				i.Spec.Cron = cronEnvEnabled()
+			})
+			mustReconcile(ctx, cronEnvAffinity)
+
+			// Both pods carry instance=<name>; the Deployment selectors keep their own labels.
+			web := fetchDeployment(ctx, cronEnvAffinity)
+			cron := cronEnvFetchCron(ctx, cronEnvAffinity)
+			Expect(web.Spec.Selector.MatchLabels).To(Equal(selectorLabels(cronEnvAffinity)))
+			Expect(cron.Spec.Selector.MatchLabels).To(Equal(cronSelectorLabels(cronEnvAffinity)))
+			for _, tmpl := range []corev1.PodTemplateSpec{web.Spec.Template, cron.Spec.Template} {
+				Expect(tmpl.Spec.Affinity).NotTo(BeNil())
+				terms := tmpl.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+				Expect(terms).To(HaveLen(1))
+				Expect(terms[0].TopologyKey).To(Equal(corev1.LabelHostname))
+				Expect(terms[0].LabelSelector.MatchLabels).To(Equal(map[string]string{labelInstance: cronEnvAffinity}))
+				Expect(labels.SelectorFromSet(terms[0].LabelSelector.MatchLabels).Matches(labels.Set(tmpl.Labels))).To(BeTrue())
+			}
+
+			instance := fetchInstance(ctx, cronEnvAffinity)
+			instance.Spec.Data.AccessMode = corev1.ReadWriteMany
+			instance.Spec.Addons.AccessMode = corev1.ReadWriteMany
+			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+			mustReconcile(ctx, cronEnvAffinity)
+
+			Expect(fetchDeployment(ctx, cronEnvAffinity).Spec.Template.Spec.Affinity).To(BeNil())
+			Expect(cronEnvFetchCron(ctx, cronEnvAffinity).Spec.Template.Spec.Affinity).To(BeNil())
 		})
 	})
 

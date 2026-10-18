@@ -127,28 +127,6 @@ func buildCronArgs(instance *odoov1.OdooInstance) []string {
 	)
 }
 
-// needsWebColocation reports whether the data or addons volume is not ReadWriteMany. Such a
-// volume can only be attached to one node, so the cron pod must run next to a web pod.
-func needsWebColocation(spec *odoov1.OdooInstanceSpec) bool {
-	return spec.Data.AccessMode != corev1.ReadWriteMany || spec.Addons.AccessMode != corev1.ReadWriteMany
-}
-
-// cronAffinity requires the cron pod on the node of a web pod when the volumes need it. It is
-// nil for ReadWriteMany volumes, where the cron pod can run anywhere.
-func cronAffinity(instanceName string, spec *odoov1.OdooInstanceSpec) *corev1.Affinity {
-	if !needsWebColocation(spec) {
-		return nil
-	}
-	return &corev1.Affinity{
-		PodAffinity: &corev1.PodAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
-				LabelSelector: &metav1.LabelSelector{MatchLabels: selectorLabels(instanceName)},
-				TopologyKey:   corev1.LabelHostname,
-			}},
-		},
-	}
-}
-
 // buildCronPodTemplate renders the cron pod template. It has no ports and no probes. Its
 // annotations are the web pod's rollout hashes, so both templates change together.
 func buildCronPodTemplate(instance *odoov1.OdooInstance, hashes rolloutHashes) corev1.PodTemplateSpec {
@@ -162,7 +140,7 @@ func buildCronPodTemplate(instance *odoov1.OdooInstance, hashes rolloutHashes) c
 			Labels:      cronPodLabels(instance.Name),
 			Annotations: podAnnotations(hashes),
 		},
-		Spec: odooPodSpec(instance, container, cronAffinity(instance.Name, &instance.Spec)),
+		Spec: odooPodSpec(instance, container, colocationAffinity(instance.Name, &instance.Spec)),
 	}
 }
 

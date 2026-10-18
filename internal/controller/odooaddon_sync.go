@@ -311,7 +311,8 @@ func shQuote(s string) string {
 //     and `set +x` keeps shell tracing from echoing it;
 //   - modules are staged in a release directory and only switched in via symlinks, so
 //     Odoo never sees a half-copied module;
-//   - the last stdout line is the commit SHA; everything else goes to stderr.
+//   - the last stdout line is the commit SHA; everything else goes to stderr;
+//   - a single-module repository without __manifest__.py at its root fails before any write.
 func buildSyncScript(s syncSpec) string {
 	gitCmd := "git"
 	authSetup := ""
@@ -415,11 +416,20 @@ done < "$MODLIST"
 done < "$PREV"
 `
 
+	// Single-module mode publishes the whole repository, so the repository root must be a
+	// module. This runs after the fetch and before the first write to the addons volume.
+	manifestCheck := ""
+	if s.SingleAddon {
+		manifestCheck = "[ -f " + syncRepoDir + "/" + syncManifest + " ] || { echo \"no " + syncManifest +
+			" at the repository root of " + s.ModuleName + "\" >&2; exit 1; }\n"
+	}
+
 	return "set -e\n" +
 		"set +x\n" +
 		"export GIT_TERMINAL_PROMPT=0\n" +
 		authSetup +
 		fetch +
+		manifestCheck +
 		"SHA=$(git -C " + syncRepoDir + " rev-parse HEAD)\n" +
 		"ADDONS=" + addonsMountPath + "\n" +
 		"RELROOT=" + shQuote(addonsMountPath+"/"+syncReleasesDir+"/"+s.AddonName) + "\n" +

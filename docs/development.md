@@ -61,7 +61,7 @@ The Go module path is `github.com/odoo-k8s/odoo-k8-operator`. The GitHub reposit
 | operator-sdk | v1.42.0 | `Makefile` (`OPERATOR_SDK_VERSION`), used by `make bundle` only |
 | kind | v0.29.0 | `test-e2e.yml` |
 | kind node image | `kindest/node:v1.34.0` | `test-e2e.yml` |
-| govulncheck | `v1.9.0` (pinned in `test.yml`; bump it by hand) | `test.yml` |
+| govulncheck | tool dependency in `go.mod` (run with `go tool govulncheck ./...`) | `test.yml` |
 | Docker | any with buildx for multi-arch | `Makefile` (`CONTAINER_TOOL`) |
 
 Tools that the Makefile needs (`controller-gen`, `kustomize`, `setup-envtest`, `golangci-lint`) are installed into `bin/` on first use. `kind`, `kubectl` and Docker are not installed by the Makefile.

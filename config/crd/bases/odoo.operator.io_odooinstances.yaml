@@ -68,8 +68,9 @@ spec:
               adminPasswordSecret:
                 description: |-
                   AdminPasswordSecret names a Secret (key "password") holding Odoo's master
-                  (database manager) password. It is injected as an environment variable and
-                  passed to Odoo via --admin-passwd, never written to the ConfigMap.
+                  (database manager) password. An init container renders it as admin_passwd into
+                  an in-memory config file that the web container reads. It never reaches the
+                  ConfigMap, and only the init container receives the environment variable.
                 type: string
               config:
                 additionalProperties:
@@ -213,7 +214,7 @@ spec:
                     type: integer
                   withDemo:
                     description: WithDemo loads demo data. Defaults to false, which
-                      passes --without-demo=all.
+                      passes --without-demo=True.
                     type: boolean
                 required:
                 - adminUserPasswordSecret

@@ -99,16 +99,23 @@ func TestDesiredReplicas(t *testing.T) {
 	}
 }
 
-func TestBuildOdooArgs(t *testing.T) {
-	plain := &odoov1.OdooInstance{}
-	if got := buildOdooArgs(plain); !reflect.DeepEqual(got, []string{upgradeFlagConfig, odooConfPath}) {
-		t.Errorf("buildOdooArgs() without admin secret = %v", got)
+func TestBuildWebArgs(t *testing.T) {
+	plain := &odoov1.OdooInstanceSpec{}
+	if got := buildWebArgs(plain); !reflect.DeepEqual(got, []string{upgradeFlagConfig, odooConfPath}) {
+		t.Errorf("buildWebArgs() without admin secret = %v", got)
 	}
 
-	withAdmin := &odoov1.OdooInstance{Spec: odoov1.OdooInstanceSpec{AdminPasswordSecret: testAdminSecret}}
-	want := []string{upgradeFlagConfig, odooConfPath, "--admin-passwd=$(ODOO_ADMIN_PASSWD)"}
-	if got := buildOdooArgs(withAdmin); !reflect.DeepEqual(got, want) {
-		t.Errorf("buildOdooArgs() with admin secret = %v, want %v", got, want)
+	// Odoo has no command line flag for the master password, so the web container reads the
+	// rendered config instead of passing an --admin-passwd argument.
+	withAdmin := &odoov1.OdooInstanceSpec{AdminPasswordSecret: testAdminSecret}
+	want := []string{upgradeFlagConfig, renderedConfPath}
+	if got := buildWebArgs(withAdmin); !reflect.DeepEqual(got, want) {
+		t.Errorf("buildWebArgs() with admin secret = %v, want %v", got, want)
+	}
+	for _, arg := range buildWebArgs(withAdmin) {
+		if strings.Contains(arg, "admin-passwd") || strings.Contains(arg, envAdminPasswd) {
+			t.Errorf("web args must not carry the master password, got %q", arg)
+		}
 	}
 }
 
@@ -140,10 +147,9 @@ func TestBuildOdooEnv(t *testing.T) {
 			wantRef:   map[string]string{envPGPassword: testPGSecret, envDBPassword: testPGSecret},
 		},
 		{
-			name:      "admin password is read from its own secret",
+			name:      "admin password is not in the Odoo containers env",
 			spec:      odoov1.OdooInstanceSpec{AdminPasswordSecret: testAdminSecret},
-			wantNames: []string{envAdminPasswd},
-			wantRef:   map[string]string{envAdminPasswd: testAdminSecret},
+			wantNames: nil,
 		},
 	}
 	for _, tc := range tests {

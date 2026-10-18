@@ -47,7 +47,9 @@ const (
 	upgradeFlagStop    = "--stop-after-init"
 	upgradeFlagNoHTTP  = "--no-http"
 	upgradeFlagConfig  = "--config"
-	upgradeFlagNoDemo  = "--without-demo=all"
+	// Odoo 19 rejects "all" as a boolean ("since 19.0, invalid boolean value"), and in 16 to 19
+	// any true value means no demo data. "True" is therefore the portable spelling.
+	upgradeFlagNoDemo  = "--without-demo=True"
 	upgradeSubcmdShell = "shell"
 	upgradeShellPath   = "/bin/sh"
 	upgradeShellFlag   = "-c"

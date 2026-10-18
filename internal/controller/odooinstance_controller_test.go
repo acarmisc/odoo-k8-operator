@@ -62,8 +62,6 @@ const (
 	secretAdminName   = "hardening-admin-secret"
 	secretPGName      = "hardening-pg-secret"
 	secretMissingName = "hardening-missing-secret"
-
-	adminPasswordArg = "--admin-passwd=$(ODOO_ADMIN_PASSWD)"
 )
 
 func createSecret(ctx context.Context, name string, data map[string][]byte) {
@@ -289,7 +287,7 @@ var _ = Describe("OdooInstance production hardening", func() {
 			Expect(cm.Data[confFileName]).To(ContainSubstring("workers = 3\n"))
 		})
 
-		It("reads the admin password from its Secret into env and args", func() {
+		It("renders the admin password into an in-memory config through an init container", func() {
 			ctx := context.Background()
 			createSecret(ctx, secretAdminName, map[string][]byte{secretKeyPassword: []byte("master")})
 			createInstance(ctx, hardeningAdmin, func(i *odoov1.OdooInstance) {
@@ -297,15 +295,22 @@ var _ = Describe("OdooInstance production hardening", func() {
 			})
 			mustReconcile(ctx, hardeningAdmin)
 
-			container := odooContainer(fetchDeployment(ctx, hardeningAdmin))
-			Expect(container.Args).To(ContainElement(adminPasswordArg))
-			Expect(container.Env).To(ContainElement(corev1.EnvVar{
+			deploy := fetchDeployment(ctx, hardeningAdmin)
+			container := odooContainer(deploy)
+			Expect(container.Args).To(Equal([]string{upgradeFlagConfig, renderedConfPath}))
+			Expect(container.Env).NotTo(ContainElement(HaveField("Name", envAdminPasswd)),
+				"the web container must not receive the master password")
+
+			podSpec := deploy.Spec.Template.Spec
+			Expect(podSpec.InitContainers).To(HaveLen(1))
+			Expect(podSpec.InitContainers[0].Env).To(ContainElement(corev1.EnvVar{
 				Name: envAdminPasswd,
 				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: secretAdminName},
 					Key:                  secretKeyPassword,
 				}},
 			}))
+			Expect(podSpec.Volumes).To(ContainElement(HaveField("Name", volumeRendered)))
 
 			cm := &corev1.ConfigMap{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configMapName(hardeningAdmin), Namespace: testNamespace}, cm)).To(Succeed())

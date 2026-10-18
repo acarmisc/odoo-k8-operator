@@ -18,6 +18,16 @@ All notable changes to this project are documented here. The format follows
 - OdooAddon with `singleAddon: true` fails with `no __manifest__.py at the repository root of <moduleName>` when
   the repository has no `__manifest__.py` at its root. Before, the sync published the repository as a module that
   Odoo could not load. The check runs before any change to the addons volume.
+- OdooInstance with `spec.adminPasswordSecret` crashed on Odoo 19 with `no such option: --admin-passwd`. Odoo has no
+  command line flag for the master password, only the `admin_passwd` config key. An init container (`render-config`)
+  now writes the key into an in-memory config (`medium: Memory`, 1Mi) that the web container reads. The password is
+  never in the ConfigMap or on the command line, and only the init container receives it. The web pods roll once
+  when you upgrade.
+- Install Jobs passed `--without-demo=all`, which Odoo 19 logs as an invalid boolean. They now pass
+  `--without-demo=True`, which means no demo data on Odoo 16 to 19.
+- An update conflict (HTTP 409, "the object has been modified") on an OdooInstance was reported as a failure: a
+  `ReconcileFailed` event, the `Degraded` condition and an error log. A conflict is normal and self-heals, so the
+  reconcile now requeues after one second without an error, condition or event.
 
 ## [0.1.0] - 2026-10-17
 

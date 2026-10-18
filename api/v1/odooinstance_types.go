@@ -36,8 +36,9 @@ type OdooInstanceSpec struct {
 	Config    map[string]string           `json:"config,omitempty"`
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 	// AdminPasswordSecret names a Secret (key "password") holding Odoo's master
-	// (database manager) password. It is injected as an environment variable and
-	// passed to Odoo via --admin-passwd, never written to the ConfigMap.
+	// (database manager) password. An init container renders it as admin_passwd into
+	// an in-memory config file that the web container reads. It never reaches the
+	// ConfigMap, and only the init container receives the environment variable.
 	AdminPasswordSecret string `json:"adminPasswordSecret,omitempty"`
 	// Upgrade makes the operator run `odoo -u <modules>` (via an OdooUpgrade) whenever the
 	// set of synced addon commits changes, and only roll the pods out once it succeeded.
@@ -77,7 +78,7 @@ type InitializeSpec struct {
 	// +kubebuilder:validation:MaxItems=100
 	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_]+$`
 	Modules []string `json:"modules"`
-	// WithDemo loads demo data. Defaults to false, which passes --without-demo=all.
+	// WithDemo loads demo data. Defaults to false, which passes --without-demo=True.
 	WithDemo bool `json:"withDemo,omitempty"`
 	// AdminUserPasswordSecret names a Secret in the same namespace (key "password") whose
 	// value becomes the password of the Odoo user "admin". Required.

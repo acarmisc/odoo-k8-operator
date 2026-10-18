@@ -80,7 +80,7 @@ func TestUpgradeArgsWithDemo(t *testing.T) {
 		want           []string
 	}{
 		{
-			name:           "install without demo adds --without-demo=all",
+			name:           "install without demo adds --without-demo=True",
 			installModules: []string{tiEnvModule},
 			want:           tiCat(base, []string{upgradeFlagInstall, tiEnvModule, upgradeFlagNoDemo}, tail),
 		},
@@ -115,7 +115,7 @@ func TestUpgradeInitScriptShape(t *testing.T) {
 	if lines[0] != "set -e" {
 		t.Fatalf("first line = %q, want set -e", lines[0])
 	}
-	installLine := "odoo --config " + odooConfPath + " -d " + tuDatabase + " -i base --without-demo=all --stop-after-init --no-http"
+	installLine := "odoo --config " + odooConfPath + " -d " + tuDatabase + " -i base --without-demo=True --stop-after-init --no-http"
 	if lines[1] != installLine {
 		t.Errorf("install line = %q, want %q", lines[1], installLine)
 	}

@@ -99,7 +99,7 @@ spec:
               withDemo:
                 description: |-
                   WithDemo loads demo data when installModules is set. Defaults to false, which
-                  passes --without-demo=all.
+                  passes --without-demo=True.
                 type: boolean
             required:
             - instanceRef

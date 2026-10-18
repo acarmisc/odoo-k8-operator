@@ -62,10 +62,13 @@ const (
 	backupPVCName  = "e2e-backups"
 	dataPVCName    = "e2e-data"
 	addonsDir      = "/mnt/odoo/addons"
-	odooImage      = "odoo:19.0"
-	pgImage        = "postgres:17"
-	curlImage      = "curlimages/curl:8.11.1"
-	busyboxImage   = "busybox:1.36"
+	webContainer   = "odoo"
+	// renderedConfPath is the config the web container reads when adminPasswordSecret is set.
+	renderedConfPath = "/run/odoo-conf/odoo.conf"
+	odooImage        = "odoo:19.0"
+	pgImage          = "postgres:17"
+	curlImage        = "curlimages/curl:8.11.1"
+	busyboxImage     = "busybox:1.36"
 
 	// Phases and conditions reported by the operator.
 	phaseRunning   = "Running"
@@ -142,6 +145,20 @@ func describeFullStack() {
 		})
 
 		It("4. serves HTTP and accepts the generated admin password only", func() {
+			By("checking that the web container reads the rendered config, without printing it")
+			// grep -c prints only the number of matching lines; the file and the password stay out of the log.
+			count, err := utils.Output(kubectlNS("exec", "deploy/"+instanceName, "-c", webContainer, "--",
+				"sh", "-c", "grep -c '^admin_passwd = ' "+renderedConfPath))
+			Expect(err).NotTo(HaveOccurred(), "the render-config init container must have written "+renderedConfPath)
+			Expect(count).To(Equal("1"))
+
+			By("checking that the web pods do not receive the master password in their environment")
+			envNames, err := utils.Output(kubectlNS("get", "pods", "-l", "app=odoo,instance="+instanceName,
+				"-o", `jsonpath={.items[*].spec.containers[?(@.name=="odoo")].env[*].name}`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.Fields(envNames)).To(ContainElement("PGPASSWORD"), "the env query must see the web container")
+			Expect(strings.Fields(envNames)).NotTo(ContainElement("ODOO_ADMIN_PASSWD"))
+
 			By("logging in through a curl pod against the web Service")
 			Eventually(func(g Gomega) {
 				out, err := runCheckPod(loginCheckPod(), podTimeout)

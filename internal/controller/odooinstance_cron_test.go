@@ -142,13 +142,13 @@ func TestCronMaxThreadsAndArgs(t *testing.T) {
 		t.Errorf("buildCronArgs() = %v, want %v", got, want)
 	}
 
+	// The cron pod does not need the master password, so its args are the same with or without it.
 	withAdmin := cronTestInstanceObj(func(i *odoov1.OdooInstance) {
 		i.Spec.AdminPasswordSecret = testAdminSecret
 		i.Spec.Cron = cronTestSpec()
 	})
-	wantAdmin := []string{upgradeFlagConfig, odooConfPath, adminPasswordArg, cronTestNoHTTP, "--max-cron-threads=5"}
-	if got := buildCronArgs(withAdmin); !reflect.DeepEqual(got, wantAdmin) {
-		t.Errorf("buildCronArgs() with admin secret = %v, want %v", got, wantAdmin)
+	if got := buildCronArgs(withAdmin); !reflect.DeepEqual(got, want) {
+		t.Errorf("buildCronArgs() with admin secret = %v, want %v", got, want)
 	}
 }
 

@@ -50,6 +50,18 @@ const (
 	confFileName    = "odoo.conf"
 	odooConfPath    = mountPathConfig + "/" + confFileName
 
+	// The master password is rendered into an in-memory copy of the config, read by the web
+	// container from renderedConfPath. The init container that writes it is containerRenderConfig.
+	containerRenderConfig = "render-config"
+	volumeRendered        = "odoo-rendered"
+	mountPathRendered     = "/run/odoo-conf"
+	renderedConfPath      = mountPathRendered + "/" + confFileName
+	renderedSizeLimit     = "1Mi"
+	renderRequestCPU      = "10m"
+	renderRequestMemory   = "16Mi"
+	renderLimitCPU        = "100m"
+	renderLimitMemory     = "64Mi"
+
 	confKeyAddonsPath = "addons_path"
 	confKeyProxyMode  = "proxy_mode"
 	confKeyListDB     = "list_db"

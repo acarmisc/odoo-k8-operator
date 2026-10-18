@@ -63,7 +63,7 @@ Other storage points:
 | Git token or SSH key | `OdooAddon.spec.gitSecretRef` | `token`, or `ssh-privatekey` and `known_hosts` |
 
 - The key is fixed. A Secret for the database must have a key `password`.
-- The master password is injected as an environment variable and passed to `--admin-passwd`. It never goes into the ConfigMap. `admin_passwd` is a blocked key in `spec.config`.
+- The master password is read by an init container, which writes it as `admin_passwd` into an in-memory config file that the web container reads. It never goes into the ConfigMap or the command line. `admin_passwd` is a blocked key in `spec.config`.
 - **Rotation of the database or master password** rolls the pods automatically. The operator watches the referenced Secrets and includes their data in the pod template hash.
 - **Rotation of a Git token** takes effect at the next sync run. The operator does not watch the Git Secret. See [odooaddon.md](odooaddon.md#rotating-credentials).
 - Do not put passwords in `spec.config`, `gitUrl` or any ConfigMap.

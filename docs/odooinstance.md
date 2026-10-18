@@ -58,14 +58,14 @@ spec:
 | `postgres.passwordSecret` | string | none | Name of a Secret in the same namespace. Key `password` is injected as `PGPASSWORD` and `DB_PASSWORD`. |
 | `config` | map of string to string | none | Extra `odoo.conf` options. See [spec.config rules](#specconfig-rules). |
 | `resources` | ResourceRequirements | see below | Resources of the Odoo container and of the upgrade Job. |
-| `adminPasswordSecret` | string | none | Name of a Secret with key `password` for Odoo's master password. Injected as `ODOO_ADMIN_PASSWD` and passed as `--admin-passwd`. Never written to the ConfigMap. |
+| `adminPasswordSecret` | string | none | Name of a Secret with key `password` for Odoo's master password. An init container writes it into an in-memory config for the web container. Never written to the ConfigMap. See [Master password](#master-password). |
 | `upgrade` | object | none | Automatic module upgrades. See [upgrades.md](upgrades.md#automatic-upgrades-specupgrade). |
 | `upgrade.modules` | list of string | required | Modules for `odoo -u`. Use `["all"]` for every module. Min 1, max 100 items. Each item matches `^[a-zA-Z0-9_]+$`. |
 | `upgrade.timeoutSeconds` | int64 | `1800` | Deadline for each generated OdooUpgrade Job. Min 60, max 86400. |
 | `initialize` | object | none | One-time database initialisation. See [Database initialisation](#database-initialisation). Can only be set when the instance is created. |
 | `initialize.modules` | list of string | required | Modules for `odoo -i`. `["base"]` is the minimal value and creates an empty Odoo database. Min 1, max 100 items, each `^[a-zA-Z0-9_]+$`. |
 | `initialize.adminUserPasswordSecret` | string | required | Secret in the same namespace, key `password`. Its value becomes the password of the Odoo user `admin`. |
-| `initialize.withDemo` | bool | `false` | Load demo data. `false` passes `--without-demo=all`. |
+| `initialize.withDemo` | bool | `false` | Load demo data. `false` passes `--without-demo=True`. |
 | `initialize.timeoutSeconds` | int64 | `1800` | Deadline for the initialisation Job. Min 60, max 86400. |
 | `cron` | object | none | Runs the scheduled actions in one dedicated pod. See [Dedicated cron pod](#dedicated-cron-pod). |
 | `cron.enabled` | bool | `false` | Creates the Deployment `<name>-cron` and renders `max_cron_threads = 0` into the web pods' `odoo.conf`. |
@@ -214,7 +214,7 @@ spec:
 
 What the operator does:
 
-1. It creates the OdooUpgrade `<name>-init`, owned by the instance. The OdooUpgrade runs `odoo -d <database> -i <modules> --stop-after-init`, with `--without-demo=all` unless `withDemo` is `true`. Then it sets the password of the Odoo user `admin` through `odoo shell`. The Job fails if either step fails.
+1. It creates the OdooUpgrade `<name>-init`, owned by the instance. The OdooUpgrade runs `odoo -d <database> -i <modules> --stop-after-init`, with `--without-demo=True` unless `withDemo` is `true`. Then it sets the password of the Odoo user `admin` through `odoo shell`. The Job fails if either step fails.
 2. Until the OdooUpgrade succeeds, the Deployment has **0 replicas** and the phase is `Initializing`. No Odoo pod runs against an empty database. The other objects (ConfigMap, Service, PVCs, PodDisruptionBudget) are reconciled as usual, because the Job needs them.
 3. On success, `status.initialized` becomes `true`, `status.initUpgrade` is cleared, the Deployment is scaled to `replicas` and the `Initialized` Event is emitted.
 4. On failure, the phase is `InitializationFailed`, `Degraded` is `True` with the failure message, the Deployment stays at 0 replicas and the reconcile is repeated every 60 seconds. Retry as described in [operations.md](operations.md#initialisation-failed).
@@ -298,6 +298,7 @@ The cron pods of `spec.cron` carry `app: odoo-cron` and `app.kubernetes.io/compo
 | `/mnt/odoo/addons` | PVC `<name>-addons` | read-only | Synced addon modules. Written only by the sync Job. |
 | `/var/lib/odoo` | PVC `<name>-data` | read-write | Filestore and sessions. |
 | `/tmp` | emptyDir | read-write | Writable temp directory. The root filesystem is read-only. |
+| `/run/odoo-conf` | emptyDir, `medium: Memory`, 1Mi | read-only in the web container, read-write in `render-config` | Rendered config with the master password. Only when `adminPasswordSecret` is set. |
 
 ### Environment variables
 
@@ -306,9 +307,18 @@ The cron pods of `spec.cron` carry `app: odoo-cron` and `app.kubernetes.io/compo
 | `PGPASSWORD` | `postgres.passwordSecret` is set | Secret key `password` |
 | `DB_PASSWORD` | `postgres.passwordSecret` is set | Secret key `password` |
 | `PGSSLMODE` | `postgres.database` is set | Literal `require` |
-| `ODOO_ADMIN_PASSWD` | `adminPasswordSecret` is set | Secret key `password` |
+| `ODOO_ADMIN_PASSWD` | `adminPasswordSecret` is set, in the `render-config` init container only | Secret key `password` |
 
-The container runs `odoo --config /etc/odoo/odoo.conf`, plus `--admin-passwd=$(ODOO_ADMIN_PASSWD)` when `adminPasswordSecret` is set. The kubelet expands the variable, so the password is not in the pod spec.
+The web container runs `odoo --config /etc/odoo/odoo.conf`. With `adminPasswordSecret` set it runs `odoo --config /run/odoo-conf/odoo.conf` instead. The cron container and the Jobs never get the master password.
+
+### Master password
+
+Odoo has no command line flag for the master password. It reads it only from the config key `admin_passwd`. When `adminPasswordSecret` is set, the web pod therefore gets:
+
+1. An init container `render-config`, which uses the Odoo image. It reads `/etc/odoo/odoo.conf` from the ConfigMap, appends `admin_passwd = <password>`, and writes the result to `/run/odoo-conf/odoo.conf`. The password reaches the script only through the `ODOO_ADMIN_PASSWD` environment variable. The script never prints it, and it fails with a message when the value is empty.
+2. A memory-backed emptyDir `odoo-rendered` (`medium: Memory`, `sizeLimit: 1Mi`). The init container writes into it, and the web container mounts it read-only at `/run/odoo-conf`.
+
+The rendered config is never stored in the ConfigMap, a Secret or a disk volume, and it disappears with the pod. Rotating the Secret changes the secrets hash of the pod template, so the pods roll and render the new password.
 
 ### Probes
 

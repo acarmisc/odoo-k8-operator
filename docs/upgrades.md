@@ -38,7 +38,7 @@ spec:
 | `spec.installModules` | list of string | none | max 100 items, each `^[a-zA-Z0-9_]+$` | Passed to `-i`. |
 | `spec.database` | string | the instance's `postgres.database` | `^[a-zA-Z0-9_.-]+$` | Database to upgrade. |
 | `spec.timeoutSeconds` | int64 | `1800` | 60 to 86400 | Job `activeDeadlineSeconds`. |
-| `spec.withDemo` | bool | `false` | none | With `installModules`, demo data is loaded only when `true`. Otherwise the Job passes `--without-demo=all`. |
+| `spec.withDemo` | bool | `false` | none | With `installModules`, demo data is loaded only when `true`. Otherwise the Job passes `--without-demo=True`, which means no demo data on Odoo 16 to 19. |
 | `spec.adminUserPasswordSecret` | string | none | non-empty when set | Secret in the same namespace, key `password`. After `installModules` succeeded, the password of the Odoo user `admin` is set through `odoo shell`. Requires `installModules`. |
 
 Rules:
@@ -91,7 +91,7 @@ Upgrades for one instance run **one at a time**. An upgrade starts only when no 
 The operator creates a Job named `<name>-run`, owned by the OdooUpgrade. The command is:
 
 ```text
-odoo --config /etc/odoo/odoo.conf -d <database> [-u <modules>] [-i <installModules> [--without-demo=all]] --stop-after-init --no-http
+odoo --config /etc/odoo/odoo.conf -d <database> [-u <modules>] [-i <installModules> [--without-demo=True]] --stop-after-init --no-http
 ```
 
 With `adminUserPasswordSecret` set, the container runs `/bin/sh -c` instead. The script runs the install above, then `odoo shell` with a short Python snippet on stdin that sets the password from the environment variable `ODOO_ADMIN_USER_PASSWORD`. `set -e` makes the Job fail when either step fails. The password is not in the arguments, the script or the log.

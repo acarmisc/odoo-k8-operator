@@ -120,7 +120,7 @@ func cronReplicas(held bool) int32 {
 
 // buildCronArgs are the web args plus --no-http and the cron worker count.
 func buildCronArgs(instance *odoov1.OdooInstance) []string {
-	args := buildOdooArgs(instance)
+	args := buildOdooArgs()
 	return append(args,
 		odooArgNoHTTP,
 		fmt.Sprintf("%s=%d", odooArgMaxCronThreads, cronMaxThreads(&instance.Spec)),

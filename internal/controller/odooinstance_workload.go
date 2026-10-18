@@ -17,7 +17,7 @@ limitations under the License.
 package controller
 
 import (
-	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -81,15 +81,96 @@ func deploymentStrategy(replicas int32, dataAccessMode corev1.PersistentVolumeAc
 	}
 }
 
-func buildOdooArgs(instance *odoov1.OdooInstance) []string {
-	// PGPASSWORD env var handles database auth via libpq; no --db-password arg.
-	args := []string{upgradeFlagConfig, odooConfPath}
-	if instance.Spec.AdminPasswordSecret != "" {
-		// Kubernetes expands $(VAR) from the container env, so the password
-		// never appears in the pod spec or the ConfigMap.
-		args = append(args, fmt.Sprintf("--admin-passwd=$(%s)", envAdminPasswd))
+// buildOdooArgs are the args of the cron pod and of every pod without a master password. The
+// database password comes from PGPASSWORD through libpq, so there is no --db-password arg.
+func buildOdooArgs() []string {
+	return []string{upgradeFlagConfig, odooConfPath}
+}
+
+// buildWebArgs are the args of the web container. With adminPasswordSecret set, Odoo reads
+// the config that the render-config init container wrote in memory, because Odoo has no
+// command line flag for the master password (only the admin_passwd config key).
+func buildWebArgs(spec *odoov1.OdooInstanceSpec) []string {
+	if adminPasswordRendered(spec) {
+		return []string{upgradeFlagConfig, renderedConfPath}
 	}
-	return args
+	return buildOdooArgs()
+}
+
+// adminPasswordRendered reports whether the web pods get the master password through the
+// render-config init container.
+func adminPasswordRendered(spec *odoov1.OdooInstanceSpec) bool {
+	return spec.AdminPasswordSecret != ""
+}
+
+// renderConfigScript is the init container script. It appends admin_passwd to the ConfigMap
+// copy and writes the result to dst. The password comes only from ODOO_ADMIN_PASSWD, so it is
+// never part of the script, the command line or the log. The file is created with mode 0600.
+func renderConfigScript(src, dst string) string {
+	return strings.Join([]string{
+		"set -eu",
+		`if [ -z "${ODOO_ADMIN_PASSWD:-}" ]; then`,
+		`  echo "render-config: ODOO_ADMIN_PASSWD is empty, check spec.adminPasswordSecret" >&2`,
+		"  exit 1",
+		"fi",
+		"umask 077",
+		"{ cat " + src + `; printf 'admin_passwd = %s\n' "$ODOO_ADMIN_PASSWD"; } > ` + dst,
+		"",
+	}, "\n")
+}
+
+// adminPasswordEnv is the master password of the render-config init container. The web and
+// cron containers never receive it.
+func adminPasswordEnv(spec *odoov1.OdooInstanceSpec) []corev1.EnvVar {
+	if !adminPasswordRendered(spec) {
+		return nil
+	}
+	return []corev1.EnvVar{secretKeyEnv(envAdminPasswd, spec.AdminPasswordSecret)}
+}
+
+// renderConfigContainer is the init container that renders the web config into the in-memory
+// volume. It uses the Odoo image and the restricted container posture of the web container.
+func renderConfigContainer(instance *odoov1.OdooInstance) corev1.Container {
+	return corev1.Container{
+		Name:    containerRenderConfig,
+		Image:   odooImage(&instance.Spec),
+		Command: []string{upgradeShellPath, upgradeShellFlag, renderConfigScript(odooConfPath, renderedConfPath)},
+		Env:     adminPasswordEnv(&instance.Spec),
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(renderRequestCPU),
+				corev1.ResourceMemory: resource.MustParse(renderRequestMemory),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(renderLimitCPU),
+				corev1.ResourceMemory: resource.MustParse(renderLimitMemory),
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: volumeConfig, MountPath: mountPathConfig, ReadOnly: true},
+			{Name: volumeRendered, MountPath: mountPathRendered},
+		},
+		SecurityContext:          odooContainerSecurityContext(),
+		TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+	}
+}
+
+// renderedVolume is the memory-backed emptyDir that holds the rendered config. It never
+// touches a disk, and it is small enough that a runaway write fails instead of filling memory.
+func renderedVolume() corev1.Volume {
+	sizeLimit := resource.MustParse(renderedSizeLimit)
+	return corev1.Volume{
+		Name: volumeRendered,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &sizeLimit},
+		},
+	}
+}
+
+// renderedVolumeMount mounts the rendered config read-only in the web container.
+func renderedVolumeMount() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: volumeRendered, MountPath: mountPathRendered, ReadOnly: true}
 }
 
 func secretKeyEnv(envName, secretName string) corev1.EnvVar {
@@ -104,6 +185,8 @@ func secretKeyEnv(envName, secretName string) corev1.EnvVar {
 	}
 }
 
+// buildOdooEnv is the environment of the Odoo containers. The master password is not in it:
+// only the render-config init container receives it (see adminPasswordEnv).
 func buildOdooEnv(spec *odoov1.OdooInstanceSpec) []corev1.EnvVar {
 	var env []corev1.EnvVar
 	if spec.Postgres.PasswordSecret != "" {
@@ -114,9 +197,6 @@ func buildOdooEnv(spec *odoov1.OdooInstanceSpec) []corev1.EnvVar {
 	}
 	if spec.Postgres.Database != "" {
 		env = append(env, corev1.EnvVar{Name: envPGSSLMode, Value: sslModeRequire})
-	}
-	if spec.AdminPasswordSecret != "" {
-		env = append(env, secretKeyEnv(envAdminPasswd, spec.AdminPasswordSecret))
 	}
 	return env
 }
@@ -312,11 +392,14 @@ func colocationAffinity(instanceName string, spec *odoov1.OdooInstanceSpec) *cor
 // buildPodTemplate renders the full web pod template. Labels, annotations and the
 // security posture are all set here so the Deployment is fully described by
 // the instance spec and the rollout hashes.
+//
+// With adminPasswordSecret set, the pod also gets the render-config init container, a
+// memory-backed volume it writes the config into, and a read-only mount of that volume.
 func buildPodTemplate(instance *odoov1.OdooInstance, hashes rolloutHashes) corev1.PodTemplateSpec {
 	startup, readiness, liveness := odooProbes()
 	container := corev1.Container{
 		Name:      appOdoo,
-		Args:      buildOdooArgs(instance),
+		Args:      buildWebArgs(&instance.Spec),
 		Resources: odooResources(&instance.Spec),
 		Ports: []corev1.ContainerPort{
 			{Name: portNameOdoo, ContainerPort: portOdoo, Protocol: corev1.ProtocolTCP},
@@ -326,11 +409,17 @@ func buildPodTemplate(instance *odoov1.OdooInstance, hashes rolloutHashes) corev
 		ReadinessProbe: readiness,
 		LivenessProbe:  liveness,
 	}
+	podSpec := odooPodSpec(instance, container, colocationAffinity(instance.Name, &instance.Spec))
+	if adminPasswordRendered(&instance.Spec) {
+		podSpec.InitContainers = []corev1.Container{renderConfigContainer(instance)}
+		podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts, renderedVolumeMount())
+		podSpec.Volumes = append(podSpec.Volumes, renderedVolume())
+	}
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      podLabels(instance.Name),
 			Annotations: podAnnotations(hashes),
 		},
-		Spec: odooPodSpec(instance, container, colocationAffinity(instance.Name, &instance.Spec)),
+		Spec: podSpec,
 	}
 }

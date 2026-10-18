@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -70,19 +71,26 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if instance.DeletionTimestamp != nil {
-		return ctrl.Result{}, r.handleFinalizer(ctx, instance)
+		if err := r.handleFinalizer(ctx, instance); err != nil {
+			return conflictResult(err)
+		}
+		return ctrl.Result{}, nil
 	}
 
 	if !controllerutil.ContainsFinalizer(instance, finalizerOdooInstance) {
 		controllerutil.AddFinalizer(instance, finalizerOdooInstance)
 		if err := r.Update(ctx, instance); err != nil {
-			return ctrl.Result{}, err
+			return conflictResult(err)
 		}
 	}
 
 	before := instance.Status.DeepCopy()
 	result, err := r.reconcileOdooInstance(ctx, instance)
 	if err != nil {
+		if isConflict(err) {
+			// Not a failure: the status is left alone, so no Degraded condition and no event.
+			return conflictResult(err)
+		}
 		odooLogger.Error(err, "Failed to reconcile OdooInstance")
 		instance.Status.Phase = phaseFailing
 		instance.Status.Ready = false
@@ -101,6 +109,28 @@ func (r *OdooInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	return result, nil
+}
+
+// conflictRequeue is how soon an OdooInstance whose write hit an update conflict is reconciled
+// again.
+const conflictRequeue = time.Second
+
+// isConflict reports whether err is an optimistic-concurrency conflict (HTTP 409), also when it
+// is wrapped with %w. The object changed between our read and our write; the next pass reads
+// the new version and succeeds.
+func isConflict(err error) bool {
+	return errors.IsConflict(err)
+}
+
+// conflictResult maps an error from a failed write to the reconcile result. A conflict is
+// transient: it is logged at debug level and requeued after conflictRequeue with no error, so
+// controller-runtime does not log it as a failure. Any other error is returned unchanged.
+func conflictResult(err error) (ctrl.Result, error) {
+	if isConflict(err) {
+		odooLogger.V(1).Info("OdooInstance changed during reconcile, retrying", "error", err.Error())
+		return ctrl.Result{RequeueAfter: conflictRequeue}, nil
+	}
+	return ctrl.Result{}, err
 }
 
 // reconcileOdooInstance runs one pass. It writes the status once at the end and emits the
